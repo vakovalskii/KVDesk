@@ -54,7 +54,7 @@ export function createTauriPlatform(): PlatformAdapter {
         console.log(`[ui] → ${eventType}`, (event as any)?.payload || "");
       }
       void tauriInvoke("client_event", { event }).catch((error) => {
-        console.error("[ui] ✗ ${eventType}", { error });
+        console.error(`[ui] ✗ ${eventType}`, { error });
       });
     },
 
@@ -86,25 +86,21 @@ export function createTauriPlatform(): PlatformAdapter {
           if (cancelled) {
             try {
               unlisten();
-            } catch (error) {
-              console.error("[platform/tauri] Failed to unlisten (post-cancel)", { error });
+            } catch {
             }
           } else {
             // Signal that listener is ready
             onReady?.();
           }
         })
-        .catch((error) => {
-          console.error("[platform/tauri] Failed to listen to server-event", { error });
-        });
+        .catch(() => {});
 
       return () => {
         cancelled = true;
         if (!unlisten) return;
         try {
           unlisten();
-        } catch (error) {
-          console.error("[platform/tauri] Failed to unlisten", { error });
+        } catch {
         }
       };
     },
@@ -129,6 +125,31 @@ export function createTauriPlatform(): PlatformAdapter {
           const path = String(args[0] ?? "");
           const maxBytes = args[1] !== undefined ? Number(args[1]) : 4096;
           return tauriInvoke("get_file_text_preview", { path, maxBytes });
+        }
+        case "transcribe-voice-stream": {
+          const audioChunkB64 = String(args[0] ?? "");
+          const audioMime = String(args[1] ?? "");
+          const sessionId = String(args[2] ?? "");
+          const baseUrl = String(args[3] ?? "");
+          const apiKey = args[4] as string | undefined;
+          const model = String(args[5] ?? "whisper-1");
+          const language = args[6] as string | undefined;
+          const isFinal = Boolean(args[7] ?? false);
+          return tauriInvoke("transcribe_voice_stream", {
+            audioChunkB64,
+            audioMime,
+            sessionId,
+            baseUrl,
+            apiKey,
+            model,
+            language,
+            isFinal
+          });
+        }
+        case "voice-models": {
+          const baseUrl = String(args[0] ?? "");
+          const apiKey = args[1] as string | undefined;
+          return tauriInvoke("list_voice_models", { baseUrl, apiKey });
         }
         case "read-memory": {
           return tauriInvoke("read_memory");
@@ -209,9 +230,7 @@ export function createTauriPlatform(): PlatformAdapter {
       switch (channel) {
         case "open-file": {
           const path = String(args[0] ?? "");
-          void tauriInvoke("open_file", { path }).catch((error) => {
-            console.error("[platform/tauri] open_file failed", { error, path });
-          });
+          void tauriInvoke("open_file", { path }).catch(() => {});
           return;
         }
         default: {
@@ -221,4 +240,3 @@ export function createTauriPlatform(): PlatformAdapter {
     },
   };
 }
-

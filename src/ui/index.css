@@ -135,6 +135,16 @@ code, pre, textarea.mono, input.mono {
   animation: shimmer 1.4s linear infinite;
 }
 
+@keyframes voice-stop-pulse {
+  0% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0.55); }
+  70% { box-shadow: 0 0 0 10px rgba(220, 38, 38, 0); }
+  100% { box-shadow: 0 0 0 0 rgba(220, 38, 38, 0); }
+}
+
+.voice-stop-pulse {
+  animation: voice-stop-pulse 1.4s ease-in-out infinite;
+}
+
 /* TodoPanel scrollable container */
 .todo-scroll-container {
   overflow-y: auto !important;

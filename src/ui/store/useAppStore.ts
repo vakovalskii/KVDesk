@@ -1,5 +1,5 @@
 import { create } from 'zustand';
-import type { ServerEvent, SessionStatus, StreamMessage, TodoItem, FileChange, MultiThreadTask, LLMModel, LLMProvider, LLMProviderSettings, ApiSettings } from "../types";
+import type { ApiSettings, ServerEvent, SessionStatus, StreamMessage, TodoItem, FileChange, MultiThreadTask, LLMModel, LLMProvider, LLMProviderSettings, VoiceServerStatus } from "../types";
 import { getPlatform } from "../platform";
 
 export type PermissionRequest = {
@@ -35,6 +35,10 @@ export type SessionView = {
 };
 
 interface AppState {
+  apiSettings: ApiSettings | null;
+  voiceServerStatus: VoiceServerStatus;
+  voiceTranscriptions: Record<string, { partial?: string; final?: string; updatedAt: number }>;
+
   sessions: Record<string, SessionView>;
   activeSessionId: string | null;
   prompt: string;
@@ -53,11 +57,14 @@ interface AppState {
   llmProviders: LLMProvider[];
   llmModels: LLMModel[];
   llmProviderSettings: LLMProviderSettings | null;
-  apiSettings: ApiSettings | null;
   schedulerDefaultModel: string | null;
   schedulerDefaultTemperature: number | null;
   schedulerDefaultSendTemperature: boolean | null;
   compactingSessionId: string | null;
+
+  setApiSettings: (settings: ApiSettings | null) => void;
+  setVoiceServerStatus: (status: VoiceServerStatus) => void;
+  clearVoiceTranscription: (sessionId: string) => void;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
@@ -85,7 +92,19 @@ function createSession(id: string): SessionView {
   return { id, title: "", status: "idle", messages: [], permissionRequests: [], hydrated: false, todos: [], historyHasMore: false, historyLoading: false, historyLoadId: 0 };
 }
 
+function normalizeLlmModels(models: LLMModel[], providers: LLMProvider[]): LLMModel[] {
+  const providerTypes = new Map(providers.map((p) => [p.id, p.type]));
+  return models.map((model) => ({
+    ...model,
+    providerType: model.providerType ?? providerTypes.get(model.providerId) ?? "openai"
+  }));
+}
+
 export const useAppStore = create<AppState>((set, get) => ({
+  apiSettings: null,
+  voiceServerStatus: { available: false, checkedAt: 0 },
+  voiceTranscriptions: {},
+
   sessions: {},
   activeSessionId: null,
   prompt: "",
@@ -104,11 +123,19 @@ export const useAppStore = create<AppState>((set, get) => ({
   llmProviders: [],
   llmModels: [],
   llmProviderSettings: null,
-  apiSettings: null,
   schedulerDefaultModel: null,
   schedulerDefaultTemperature: null,
   schedulerDefaultSendTemperature: null,
   compactingSessionId: null,
+
+  setApiSettings: (apiSettings) => set({ apiSettings }),
+  setVoiceServerStatus: (voiceServerStatus) => set({ voiceServerStatus }),
+  clearVoiceTranscription: (sessionId) => set((state) => {
+    if (!state.voiceTranscriptions[sessionId]) return {};
+    const next = { ...state.voiceTranscriptions };
+    delete next[sessionId];
+    return { voiceTranscriptions: next };
+  }),
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
@@ -177,6 +204,44 @@ export const useAppStore = create<AppState>((set, get) => ({
     const state = get();
 
     switch (event.type) {
+      case "settings.loaded": {
+        set({ apiSettings: event.payload.settings });
+        break;
+      }
+
+      case "voice.server.status": {
+        // Always bump checkedAt so UI can stop "checking..." even if available/error didn't change
+        set({ voiceServerStatus: { ...event.payload, checkedAt: Date.now() } });
+        break;
+      }
+
+      case "voice.transcription.partial": {
+        const { sessionId, text } = event.payload;
+        set((state) => ({
+          voiceTranscriptions: {
+            ...state.voiceTranscriptions,
+            [sessionId]: { ...(state.voiceTranscriptions[sessionId] ?? {}), partial: text, updatedAt: Date.now() }
+          }
+        }));
+        break;
+      }
+
+      case "voice.transcription.final": {
+        const { sessionId, text } = event.payload;
+        set((state) => ({
+          voiceTranscriptions: {
+            ...state.voiceTranscriptions,
+            [sessionId]: { ...(state.voiceTranscriptions[sessionId] ?? {}), final: text, updatedAt: Date.now() }
+          }
+        }));
+        break;
+      }
+
+      case "voice.transcription.error": {
+        set({ globalError: event.payload.message });
+        break;
+      }
+
       case "session.list": {
         const nextSessions: Record<string, SessionView> = {};
         for (const session of event.payload.sessions) {
@@ -630,13 +695,10 @@ export const useAppStore = create<AppState>((set, get) => ({
       case "models.loaded": {
         const { models } = event.payload;
         set({ availableModels: models });
-        console.log('[AppStore] Models loaded:', models);
         break;
       }
 
       case "models.error": {
-        const { message } = event.payload;
-        console.error('[AppStore] Failed to load models:', message);
         break;
       }
 
@@ -749,48 +811,35 @@ export const useAppStore = create<AppState>((set, get) => ({
 
       case "llm.providers.loaded": {
         const { settings } = event.payload;
+        const normalizedModels = normalizeLlmModels(settings.models, settings.providers);
         set({ 
           llmProviders: settings.providers, 
-          llmModels: settings.models,
-          llmProviderSettings: settings
+          llmModels: normalizedModels,
+          llmProviderSettings: { ...settings, models: normalizedModels }
         });
-        console.log('[AppStore] LLM providers loaded:', settings);
         break;
       }
 
       case "llm.providers.saved": {
         const { settings } = event.payload;
+        const normalizedModels = normalizeLlmModels(settings.models, settings.providers);
         set({ 
           llmProviders: settings.providers, 
-          llmModels: settings.models,
-          llmProviderSettings: settings
+          llmModels: normalizedModels,
+          llmProviderSettings: { ...settings, models: normalizedModels }
         });
-        console.log('[AppStore] LLM providers saved:', settings);
         break;
       }
 
       case "llm.models.fetched": {
-        const { models } = event.payload;
-        console.log('[AppStore] LLM models fetched:', models);
         break;
       }
 
       case "llm.models.error": {
-        const { message } = event.payload;
-        console.error('[AppStore] LLM models error:', message);
         break;
       }
 
       case "llm.models.checked": {
-        const { unavailableModels } = event.payload;
-        console.log('[AppStore] LLM models checked, unavailable:', unavailableModels);
-        break;
-      }
-
-      case "settings.loaded": {
-        const { settings } = event.payload;
-        set({ apiSettings: settings });
-        console.log('[AppStore] Settings loaded:', settings);
         break;
       }
 

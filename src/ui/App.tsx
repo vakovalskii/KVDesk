@@ -427,8 +427,7 @@ function App() {
     try {
       const realType = eventMessage.delta.type.split("_")[0];
       return eventMessage.delta[realType];
-    } catch (error) {
-      console.error(error);
+    } catch {
       return "";
     }
   };
@@ -481,7 +480,6 @@ function App() {
     
     // Handle settings loaded event
     if (event.type === "settings.loaded") {
-      setApiSettings(event.payload.settings);
       setSettingsLoaded(true);
     }
     
@@ -793,7 +791,6 @@ function App() {
     
     // No LLM models - check legacy API settings
     if (apiSettings === null) {
-      console.log('[App] No settings or LLM providers found, opening Settings modal');
       setShowStartModal(false);
       setShowSettingsModal(true);
       return;
@@ -806,7 +803,6 @@ function App() {
                           apiSettings.apiKey !== 'undefined';
     
     if (!hasValidApiKey) {
-      console.log('[App] No valid API key or enabled LLM models found, opening Settings modal');
       setShowStartModal(false);
       setShowSettingsModal(true);
     } else {
@@ -868,7 +864,6 @@ function App() {
   useEffect(() => {
     // Only scroll if we actually added a new message (not just updated existing ones)
     if (messages.length > prevMessagesLengthRef.current) {
-      console.log('[AutoScroll] New message detected, autoScrollEnabled:', autoScrollEnabled, 'isUserScrolledUp:', isUserScrolledUpRef.current);
       if (autoScrollEnabled && !isUserScrolledUpRef.current) {
         messagesEndRef.current?.scrollIntoView({ behavior: "smooth" });
       }

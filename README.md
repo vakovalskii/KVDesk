@@ -155,6 +155,17 @@ Windows build requires cross-compilation setup. Check `.github/workflows/` for C
    - **Temperature** — 0.0-2.0 (default: 0.3)
 3. Click **Save Settings**
 
+### Voice Input (Speech-to-Text)
+
+- Start a local transcription server:
+  - `chmod +x scripts/setup_voice_server.sh`
+  - `./scripts/setup_voice_server.sh` (Docker by default; falls back to uvx or venv)
+  - Optional vars: `PORT`, `MODEL`, `DEVICE`, `COMPUTE_TYPE`, `DOCKER_TAG`
+  - Docker resources: `DOCKER_MEMORY` (e.g. `6g`), `DOCKER_CPUS` (e.g. `6`), `DOCKER_SHM_SIZE` (e.g. `2g`)
+  - Example: `DOCKER_MEMORY=6g DOCKER_CPUS=6 DOCKER_SHM_SIZE=2g ./scripts/setup_voice_server.sh`
+- In **Settings → Voice** set `Voice Base URL` (e.g. `http://localhost:8000/v1`), `Model`, optional `API Key`/`Language`
+- Wait for **Connected**, then use the mic button in the prompt input
+
 ### Example Configurations
 
 **Local vLLM:**

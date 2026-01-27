@@ -204,6 +204,19 @@ export type ZaiApiUrl = 'default' | 'coding';
 
 export type ZaiReaderApiUrl = 'default' | 'coding';
 
+export type VoiceSettings = {
+  baseUrl: string;
+  apiKey?: string;
+  model: string;
+  language?: string;
+};
+
+export type VoiceServerStatus = {
+  available: boolean;
+  error?: string;
+  checkedAt?: number;
+};
+
 export type ApiSettings = {
   apiKey: string;
   baseUrl: string;
@@ -230,6 +243,7 @@ export type ApiSettings = {
   roleGroupSettings?: RoleGroupSettings; // Default role group configuration
   requestTimeoutMs?: number; // API request timeout in ms (default: 300000 = 5 min)
   locale?: string; // UI language (e.g. 'en', 'ru')
+  voiceSettings?: VoiceSettings; // Voice transcription settings
 };
 
 export type ModelInfo = {
@@ -297,6 +311,11 @@ export type ServerEvent =
   | { type: "llm.models.fetched"; payload: { providerId: string; models: LLMModel[] } }
   | { type: "llm.models.error"; payload: { providerId: string; message: string } }
   | { type: "llm.models.checked"; payload: { unavailableModels: string[] } }
+  // Voice events
+  | { type: "voice.server.status"; payload: VoiceServerStatus }
+  | { type: "voice.transcription.partial"; payload: { sessionId: string; text: string } }
+  | { type: "voice.transcription.final"; payload: { sessionId: string; text: string } }
+  | { type: "voice.transcription.error"; payload: { sessionId: string; message: string } }
   // Skills events
   | { type: "skills.loaded"; payload: { skills: Skill[]; repositories: SkillRepository[]; lastFetched?: number } }
   | { type: "skills.error"; payload: { message: string } }
@@ -353,6 +372,9 @@ export type ClientEvent =
   | { type: "llm.models.fetch"; payload: { providerId: string } }
   | { type: "llm.models.test"; payload: { provider: LLMProvider } }
   | { type: "llm.models.check" }
+  // Voice events
+  | { type: "voice.check"; payload: { baseUrl: string; apiKey?: string; model: string; language?: string } }
+  | { type: "voice.preload"; payload: { baseUrl: string; apiKey?: string; model: string } }
   // Skills events
   | { type: "skills.get" }
   | { type: "skills.refresh" }
