@@ -1,4 +1,6 @@
 import type { SDKMessage, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
+import type { MiniWorkflow, MiniWorkflowSummary, MiniWorkflowTestResult } from "../shared/mini-workflow-types";
+export type { MiniWorkflow, MiniWorkflowSummary, MiniWorkflowTestResult } from "../shared/mini-workflow-types";
 
 export type UserPromptMessage = {
   type: "user_prompt";
@@ -96,6 +98,7 @@ export type ThreadTask = {
   roleId?: RoleGroupRoleId;
   roleName?: string;
 };
+
 
 export type CreateTaskPayload = {
   mode: TaskMode;
@@ -242,6 +245,14 @@ export type ServerEvent =
   // Skills events
   | { type: "skills.loaded"; payload: { skills: Skill[]; marketplaceUrl: string; lastFetched?: number } }
   | { type: "skills.error"; payload: { message: string } }
+  // Mini workflow events
+  | { type: "miniworkflow.list"; payload: { workflows: MiniWorkflowSummary[] } }
+  | { type: "miniworkflow.loaded"; payload: { workflow: MiniWorkflow } }
+  | { type: "miniworkflow.distill.result"; payload: { sessionId: string; result: { status: "success"; workflow: MiniWorkflow } | { status: "needs_clarification"; questions: string[] } | { status: "not_suitable"; reason: string; suggest_prompt_preset: boolean } } }
+  | { type: "miniworkflow.tests.result"; payload: { workflowId: string; passed: boolean; results: MiniWorkflowTestResult[] } }
+  | { type: "miniworkflow.fix.result"; payload: { workflow: MiniWorkflow; attempt: number } }
+  | { type: "miniworkflow.replay.started"; payload: { workflowId: string; sessionId: string } }
+  | { type: "miniworkflow.error"; payload: { message: string } }
   // Scheduler events
   | { type: "scheduler.notification"; payload: { title: string; body: string } }
   | { type: "scheduler.task_execute"; payload: { taskId: string; title: string; prompt?: string } }
@@ -282,6 +293,16 @@ export type ClientEvent =
   | { type: "skills.refresh" }
   | { type: "skills.toggle"; payload: { skillId: string; enabled: boolean } }
   | { type: "skills.set-marketplace"; payload: { url: string } }
+  // Mini workflow events
+  | { type: "miniworkflow.list"; payload?: { cwd?: string } }
+  | { type: "miniworkflow.get"; payload: { workflowId: string; cwd?: string } }
+  | { type: "miniworkflow.distill"; payload: { sessionId: string; clarification?: string } }
+  | { type: "miniworkflow.test"; payload: { workflow: MiniWorkflow } }
+  | { type: "miniworkflow.fix"; payload: { workflow: MiniWorkflow; failedResults: MiniWorkflowTestResult[]; attempt: number } }
+  | { type: "miniworkflow.archive"; payload: { workflowId: string; cwd?: string } }
+  | { type: "miniworkflow.save"; payload: { workflow: MiniWorkflow; scope?: "global" | "project"; cwd?: string } }
+  | { type: "miniworkflow.delete"; payload: { workflowId: string; scope?: "global" | "project" | "both"; cwd?: string } }
+  | { type: "miniworkflow.replay"; payload: { workflowId: string; inputs: Record<string, unknown>; cwd?: string } }
   // Scheduler events
   | { type: "scheduler.default_model.get" }
   | { type: "scheduler.default_model.set"; payload: { modelId: string } }

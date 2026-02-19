@@ -216,6 +216,8 @@ describe("DiffViewerModal", () => {
     const mockOnClose = vi.fn();
     mockInvoke
       .mockResolvedValueOnce(mockOldContent)
+      .mockResolvedValueOnce(mockNewContent)
+      .mockResolvedValueOnce(mockOldContent)
       .mockResolvedValueOnce(mockNewContent);
 
     const { rerender } = render(
