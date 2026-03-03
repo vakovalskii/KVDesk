@@ -368,6 +368,41 @@ fn handle_session_sync(db: &Arc<Database>, payload: &Value) {
   }
 }
 
+/// Applies llm.models.fetched payload to DB: merges new models for the provider.
+/// Extracted for testability.
+fn apply_llm_models_fetched(db: &db::Database, payload: &Value) -> Result<(), String> {
+  let provider_id = payload
+    .get("providerId")
+    .and_then(|v| v.as_str())
+    .unwrap_or("");
+  let json_models = payload.get("models").and_then(|v| v.as_array());
+  if provider_id.is_empty() || json_models.is_none() {
+    return Ok(());
+  }
+  let mut settings = db
+    .get_llm_provider_settings()
+    .map_err(|e| format!("get_llm_provider_settings: {}", e))?;
+  settings.models.retain(|m| m.provider_id != provider_id);
+  for m in json_models.unwrap() {
+    let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if !id.is_empty() {
+      settings.models.push(LLMModel {
+        id: id.clone(),
+        provider_id: provider_id.to_string(),
+        name: m
+          .get("name")
+          .and_then(|v| v.as_str())
+          .unwrap_or(&id)
+          .to_string(),
+        enabled: m.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        config: None,
+      });
+    }
+  }
+  db.save_llm_provider_settings(&settings)
+    .map_err(|e| format!("save_llm_provider_settings: {}", e))
+}
+
 fn normalize_llm_provider_settings(value: Option<Value>) -> Value {
   let mut obj = match value {
     Some(Value::Object(o)) => o,
@@ -660,7 +695,19 @@ fn start_sidecar(app: tauri::AppHandle, sidecar_state: &SidecarState) -> Result<
                   }
                   // Continue to emit to frontend
                 }
-                
+
+                // Handle llm.models.fetched - sidecar saves to JSON, we must sync to DB
+                // so llm.providers.get returns fresh data
+                if event_type == "llm.models.fetched" {
+                  if let Some(payload) = event.get("payload") {
+                    let state: tauri::State<'_, AppState> = app_handle.state();
+                    if let Err(e) = apply_llm_models_fetched(&state.db, payload) {
+                      eprintln!("[llm.models.fetched] Failed to save to DB: {}", e);
+                    }
+                  }
+                  // Continue to emit to frontend
+                }
+
                 // Only log non-streaming events to reduce noise
                 if event_type != "stream.message" {
                   eprintln!("[sidecar] → {}", event_type);
@@ -2142,5 +2189,145 @@ fn main() {
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn make_test_db() -> db::Database {
+        db::Database::new(Path::new(":memory:")).unwrap()
+    }
+
+    fn save_test_provider(db: &db::Database, id: &str, name: &str, provider_type: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let provider = db::LLMProvider {
+            id: id.to_string(),
+            name: name.to_string(),
+            provider_type: provider_type.to_string(),
+            base_url: Some("http://localhost:11434/v1".to_string()),
+            api_key: None,
+            enabled: true,
+            config: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.save_provider(&provider).unwrap();
+    }
+
+    #[test]
+    fn llm_models_fetched_adds_ollama_models() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-123", "Ollama", "ollama");
+
+        let payload = serde_json::json!({
+            "providerId": "ollama-123",
+            "models": [
+                { "id": "ollama-123::gpt-oss:20b", "name": "gpt-oss:20b", "enabled": true }
+            ]
+        });
+
+        apply_llm_models_fetched(&db, &payload).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert_eq!(settings.models.len(), 1);
+        assert_eq!(settings.models[0].id, "ollama-123::gpt-oss:20b");
+        assert_eq!(settings.models[0].name, "gpt-oss:20b");
+        assert_eq!(settings.models[0].provider_id, "ollama-123");
+        assert!(settings.models[0].enabled);
+    }
+
+    #[test]
+    fn llm_models_fetched_replaces_existing_models_for_provider() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-456", "Ollama", "ollama");
+        let mut settings = db.get_llm_provider_settings().unwrap();
+        settings.models.push(db::LLMModel {
+            id: "ollama-456::old-model".to_string(),
+            provider_id: "ollama-456".to_string(),
+            name: "old-model".to_string(),
+            enabled: true,
+            config: None,
+        });
+        db.save_llm_provider_settings(&settings).unwrap();
+
+        let payload = serde_json::json!({
+            "providerId": "ollama-456",
+            "models": [
+                { "id": "ollama-456::gpt-oss:20b", "name": "gpt-oss:20b", "enabled": true }
+            ]
+        });
+
+        apply_llm_models_fetched(&db, &payload).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert_eq!(settings.models.len(), 1);
+        assert_eq!(settings.models[0].id, "ollama-456::gpt-oss:20b");
+    }
+
+    #[test]
+    fn llm_models_fetched_preserves_other_providers_models() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-1", "Ollama", "ollama");
+        save_test_provider(&db, "openai-1", "OpenAI", "openai");
+        let mut settings = db.get_llm_provider_settings().unwrap();
+        settings.models.push(db::LLMModel {
+            id: "openai-1::gpt-4".to_string(),
+            provider_id: "openai-1".to_string(),
+            name: "gpt-4".to_string(),
+            enabled: true,
+            config: None,
+        });
+        db.save_llm_provider_settings(&settings).unwrap();
+
+        let payload = serde_json::json!({
+            "providerId": "ollama-1",
+            "models": [
+                { "id": "ollama-1::gpt-oss:20b", "name": "gpt-oss:20b", "enabled": true }
+            ]
+        });
+
+        apply_llm_models_fetched(&db, &payload).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert_eq!(settings.models.len(), 2);
+        let openai_model = settings.models.iter().find(|m| m.provider_id == "openai-1").unwrap();
+        assert_eq!(openai_model.name, "gpt-4");
+        let ollama_model = settings.models.iter().find(|m| m.provider_id == "ollama-1").unwrap();
+        assert_eq!(ollama_model.name, "gpt-oss:20b");
+    }
+
+    #[test]
+    fn llm_models_fetched_ignores_empty_payload() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-1", "Ollama", "ollama");
+
+        apply_llm_models_fetched(&db, &serde_json::json!({})).unwrap();
+        apply_llm_models_fetched(&db, &serde_json::json!({ "providerId": "" })).unwrap();
+        apply_llm_models_fetched(&db, &serde_json::json!({ "providerId": "x", "models": [] })).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert!(settings.models.is_empty());
+    }
+
+    #[test]
+    fn llm_models_fetched_uses_name_or_id() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-1", "Ollama", "ollama");
+
+        let payload = serde_json::json!({
+            "providerId": "ollama-1",
+            "models": [
+                { "id": "ollama-1::m1", "name": "Display Name", "enabled": false }
+            ]
+        });
+
+        apply_llm_models_fetched(&db, &payload).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert_eq!(settings.models[0].name, "Display Name");
+        assert!(!settings.models[0].enabled);
+    }
 }
 

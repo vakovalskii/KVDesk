@@ -186,13 +186,16 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
     getPlatform().sendClientEvent({ type: "llm.models.fetch", payload: { providerId } });
     
     const unsubscribe = getPlatform().onServerEvent((event) => {
-      if (event.type === "llm.models.fetched") {
-        const { models } = event.payload;
-        setLlmModels(models);
+      if (event.type === "llm.models.fetched" && event.payload.providerId === providerId) {
+        const { models: newModels } = event.payload;
+        setLlmModels(prev => [
+          ...prev.filter(m => m.providerId !== providerId),
+          ...newModels,
+        ]);
         setLlmLoading(false);
         unsubscribe();
-        loadLlmProviders(); // Reload to get updated settings
-      } else if (event.type === "llm.models.error") {
+        loadLlmProviders();
+      } else if (event.type === "llm.models.error" && event.payload.providerId === providerId) {
         setLlmError(event.payload.message);
         setLlmLoading(false);
         unsubscribe();
@@ -963,7 +966,9 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
   const [type, setType] = useState<LLMProviderType>('openai');
   const [name, setName] = useState('');
   const [apiKey, setApiKey] = useState('');
+  const OLLAMA_LOCAL_URL = 'http://localhost:11434/v1';
   const [baseUrl, setBaseUrl] = useState('');
+  const [useRemoteOllama, setUseRemoteOllama] = useState(false);
   const [zaiApiPrefix, setZaiApiPrefix] = useState<'default' | 'coding'>('default');
   const [error, setError] = useState('');
   const [testing, setTesting] = useState(false);
@@ -978,8 +983,10 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
       } else if (zaiApiPrefix === 'coding') {
         setBaseUrl('https://api.z.ai/api/coding/paas/v4');
       }
+    } else if (type === 'ollama' && !useRemoteOllama) {
+      setBaseUrl(OLLAMA_LOCAL_URL);
     }
-  }, [type, zaiApiPrefix]);
+  }, [type, zaiApiPrefix, useRemoteOllama]);
 
   // Auto-select default prefix when Z.AI is chosen
   useEffect(() => {
@@ -994,13 +1001,22 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
     setTesting(true);
     setAvailableModels([]);
 
-    // API key not required for Claude Code
-    if (type !== 'claude-code' && !apiKey.trim()) {
+    const resolvedBaseUrl = type === 'ollama'
+      ? (useRemoteOllama ? baseUrl.trim() : OLLAMA_LOCAL_URL)
+      : baseUrl.trim();
+
+    // API key not required for Claude Code and Ollama
+    if (type !== 'claude-code' && type !== 'ollama' && !apiKey.trim()) {
       setError('API key is required');
       setTesting(false);
       return;
     }
     if (type === 'openai' && !baseUrl.trim()) {
+      setError('Base URL is required');
+      setTesting(false);
+      return;
+    }
+    if (type === 'ollama' && useRemoteOllama && !baseUrl.trim()) {
       setError('Base URL is required');
       setTesting(false);
       return;
@@ -1011,8 +1027,8 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
       id: `temp-${Date.now()}`,
       type,
       name: name.trim() || 'Test Provider',
-      apiKey: type === 'claude-code' ? '' : apiKey.trim(),
-      baseUrl: type === 'openrouter' || type === 'claude-code' ? undefined : (type === 'zai' ? baseUrl.trim() : baseUrl.trim()),
+      apiKey: (type === 'claude-code' || type === 'ollama') ? '' : apiKey.trim(),
+      baseUrl: type === 'openrouter' || type === 'claude-code' ? undefined : resolvedBaseUrl,
       zaiApiPrefix: type === 'zai' ? zaiApiPrefix : undefined,
       enabled: true,
     };
@@ -1053,16 +1069,25 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
     e.preventDefault();
     setError('');
 
+    const resolvedBaseUrl = type === 'ollama'
+      ? (useRemoteOllama ? baseUrl.trim() : OLLAMA_LOCAL_URL)
+      : baseUrl.trim();
+
     if (!name.trim()) {
       setError('Provider name is required');
       return;
     }
-    // API key not required for Claude Code
-    if (type !== 'claude-code' && !apiKey.trim()) {
+
+    // API key not required for Claude Code and Ollama
+    if (type !== 'claude-code' && type !== 'ollama' && !apiKey.trim()) {
       setError('API key is required');
       return;
     }
     if (type === 'openai' && !baseUrl.trim()) {
+      setError('Base URL is required');
+      return;
+    }
+    if (type === 'ollama' && useRemoteOllama && !baseUrl.trim()) {
       setError('Base URL is required');
       return;
     }
@@ -1072,8 +1097,8 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
       id: `${type}-${name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
       type,
       name: name.trim(),
-      apiKey: type === 'claude-code' ? '' : apiKey.trim(),
-      baseUrl: type === 'openrouter' || type === 'claude-code' ? undefined : (type === 'zai' ? baseUrl.trim() : baseUrl.trim()),
+      apiKey: (type === 'claude-code' || type === 'ollama') ? '' : apiKey.trim(),
+      baseUrl: type === 'openrouter' || type === 'claude-code' ? undefined : resolvedBaseUrl,
       zaiApiPrefix: type === 'zai' ? zaiApiPrefix : undefined,
       enabled: true,
     };
@@ -1119,6 +1144,7 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
     setName('');
     setApiKey('');
     setBaseUrl('');
+    setUseRemoteOllama(false);
     setZaiApiPrefix('default');
     setError('');
     setTestSuccess(false);
@@ -1154,11 +1180,38 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
                   <option value="openai">OpenAI</option>
                   <option value="openrouter">OpenRouter</option>
                   <option value="zai">Z.AI</option>
+                  <option value="ollama">Ollama</option>
                   <option value="claude-code">Claude Code (Subscription)</option>
                 </select>
               </div>
 
-              {type === 'openai' && (
+              {type === 'ollama' && (
+                <div className="space-y-3">
+                  <label className="flex items-center gap-2 text-sm text-ink-700">
+                    <input
+                      type="checkbox"
+                      checked={useRemoteOllama}
+                      onChange={(e) => {
+                        const checked = e.target.checked;
+                        setUseRemoteOllama(checked);
+                        if (!checked) {
+                          setBaseUrl(OLLAMA_LOCAL_URL);
+                        }
+                      }}
+                      className="h-4 w-4 rounded border border-ink-900/20"
+                    />
+                    {t('settings.ollamaRemoteToggle')}
+                  </label>
+
+                  {!useRemoteOllama && (
+                    <p className="text-xs text-ink-500">
+                      {t('settings.ollamaLocalHint', { url: OLLAMA_LOCAL_URL })}
+                    </p>
+                  )}
+                </div>
+              )}
+
+              {(type === 'openai' || (type === 'ollama' && useRemoteOllama)) && (
                 <div>
                   <label className="block text-sm font-medium text-ink-700 mb-2">
                     {t('settings.baseUrl')}
@@ -1167,7 +1220,7 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
                     type="text"
                     value={baseUrl}
                     onChange={(e) => setBaseUrl(e.target.value)}
-                    placeholder={t('settings.baseUrlPlaceholder')}
+                    placeholder={type === 'ollama' ? t('settings.ollamaRemotePlaceholder') : t('settings.baseUrlPlaceholder')}
                     className="w-full px-4 py-2.5 text-sm border border-ink-900/20 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-accent/20"
                   />
                 </div>
@@ -1189,8 +1242,8 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
                 </div>
               )}
 
-              {/* API Key - not needed for Claude Code */}
-              {type !== 'claude-code' && (
+              {/* API Key - not needed for Claude Code and Ollama */}
+              {type !== 'claude-code' && type !== 'ollama' && (
                 <div>
                   <label className="block text-sm font-medium text-ink-700 mb-2">
                     {t('settings.apiKey')}
@@ -1219,7 +1272,7 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
               <button
                 type="button"
                 onClick={handleTestConnection}
-                disabled={testing || (type !== 'claude-code' && !apiKey.trim()) || (type === 'openai' && !baseUrl.trim())}
+                disabled={testing || ((type !== 'claude-code' && type !== 'ollama') && !apiKey.trim()) || (type === 'openai' && !baseUrl.trim()) || (type === 'ollama' && useRemoteOllama && !baseUrl.trim())}
                 className="w-full px-4 py-2.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
                 {testing ? (

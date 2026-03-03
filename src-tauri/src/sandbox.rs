@@ -331,8 +331,8 @@ mod tests {
             assert!(result.output.contains("4"));
         } else {
             // Python might not be installed
-            assert!(result.error.unwrap().contains("Python not found") || 
-                    result.error.as_ref().unwrap().contains("Failed"));
+            let err = result.error.as_ref().unwrap();
+            assert!(err.contains("Python not found") || err.contains("Failed"));
         }
     }
 }
