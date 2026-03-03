@@ -4,6 +4,24 @@ import { dirnameFsPath, isPathWithin, normalizeFsPath } from "../platform/fs-pat
 import { useI18n } from "../i18n";
 import { FilePreviewPanel } from "./FilePreviewPanel";
 
+// --- Thumbnail in-memory cache (path → dataUrl) ---
+// Shared across all FileBrowser instances and remounts so images aren't re-fetched on scroll
+const THUMB_CACHE_MAX = 500;
+const _thumbCache = new Map<string, string>();
+
+function thumbCacheGet(path: string): string | undefined {
+  return _thumbCache.get(path);
+}
+
+function thumbCacheSet(path: string, dataUrl: string): void {
+  if (_thumbCache.size >= THUMB_CACHE_MAX) {
+    // Evict oldest entry (Map preserves insertion order)
+    const firstKey = _thumbCache.keys().next().value;
+    if (firstKey !== undefined) _thumbCache.delete(firstKey);
+  }
+  _thumbCache.set(path, dataUrl);
+}
+
 // --- Thumbnail request queue (max N concurrent IPC calls) ---
 const THUMB_CONCURRENCY = 1;
 let _thumbActive = 0;
@@ -55,8 +73,9 @@ function isImage(name: string): boolean {
 // Thumbnail for a single file row — lazy-loads via IntersectionObserver with debounce + queue
 function FileThumbnail({ path }: { path: string }) {
   const ref = useRef<HTMLDivElement>(null);
-  const [src, setSrc] = useState<string | null>(null);
-  const triedRef = useRef(false);
+  // Initialise from cache so previously-loaded images show instantly on remount
+  const [src, setSrc] = useState<string | null>(() => thumbCacheGet(path) ?? null);
+  const triedRef = useRef(src !== null); // already have it → no need to fetch
 
   useEffect(() => {
     if (!ref.current) return;
@@ -82,7 +101,12 @@ function FileThumbnail({ path }: { path: string }) {
           enqueueThumbnail(() =>
             getPlatform()
               .invoke<string | null>('get-thumbnail', path, 64)
-              .then((dataUrl) => { if (dataUrl) setSrc(dataUrl); })
+              .then((dataUrl) => {
+                if (dataUrl) {
+                  thumbCacheSet(path, dataUrl);
+                  setSrc(dataUrl);
+                }
+              })
               .catch(() => {/* silently ignore */})
           );
         }, 80);

@@ -14,9 +14,21 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
+
+// --- Thumbnail cache (path → (mtime_secs, dataUrl)) ---
+struct ThumbCache {
+  map: HashMap<String, (u64, String)>,
+}
+
+static THUMB_CACHE: OnceLock<Mutex<ThumbCache>> = OnceLock::new();
+
+fn thumb_cache() -> &'static Mutex<ThumbCache> {
+  THUMB_CACHE.get_or_init(|| Mutex::new(ThumbCache { map: HashMap::new() }))
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -819,6 +831,23 @@ fn list_directory(path: String) -> Result<Vec<FileItem>, String> {
 #[tauri::command]
 fn get_thumbnail(path: String, size: Option<u32>) -> Result<Option<String>, String> {
   let thumb_size = size.unwrap_or(128);
+
+  // Get file mtime for cache invalidation
+  let mtime = fs::metadata(&path)
+    .and_then(|m| m.modified())
+    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+    .unwrap_or(0);
+
+  // Check cache
+  {
+    let cache = thumb_cache().lock().unwrap();
+    if let Some((cached_mtime, data_url)) = cache.map.get(&path) {
+      if *cached_mtime == mtime {
+        return Ok(Some(data_url.clone()));
+      }
+    }
+  }
+
   let img = image::open(&path).map_err(|e| format!("[get_thumbnail] Cannot open image: {e}"))?;
   let thumb = img.thumbnail(thumb_size, thumb_size);
 
@@ -829,7 +858,15 @@ fn get_thumbnail(path: String, size: Option<u32>) -> Result<Option<String>, Stri
     .map_err(|e| format!("[get_thumbnail] Encode failed: {e}"))?;
 
   let encoded = base64::engine::general_purpose::STANDARD.encode(&buf);
-  Ok(Some(format!("data:image/png;base64,{encoded}")))
+  let data_url = format!("data:image/png;base64,{encoded}");
+
+  // Store in cache
+  {
+    let mut cache = thumb_cache().lock().unwrap();
+    cache.map.insert(path, (mtime, data_url.clone()));
+  }
+
+  Ok(Some(data_url))
 }
 
 #[tauri::command]
