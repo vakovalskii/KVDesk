@@ -272,6 +272,7 @@ export type ClientEvent =
   | { type: "settings.get" }
   | { type: "settings.save"; payload: { settings: ApiSettings } }
   | { type: "open.external"; payload: { url: string } }
+  | { type: "open.path"; payload: { path: string } }
   | { type: "models.get" }
   | { type: "task.create"; payload: CreateTaskPayload }
   | { type: "task.start"; payload: { taskId: string } }
@@ -298,4 +299,4 @@ export type ClientEvent =
   | { type: "miniworkflow.archive"; payload: { workflowId: string; cwd?: string } }
   | { type: "miniworkflow.save"; payload: { workflow: MiniWorkflow; scope?: "global" | "project"; cwd?: string } }
   | { type: "miniworkflow.delete"; payload: { workflowId: string; scope?: "global" | "project" | "both"; cwd?: string } }
-  | { type: "miniworkflow.replay"; payload: { workflowId: string; inputs: Record<string, unknown>; cwd?: string } };
+  | { type: "miniworkflow.replay"; payload: { workflowId: string; inputs: Record<string, unknown>; cwd?: string; model?: string } };

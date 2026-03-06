@@ -3,188 +3,10 @@ import { promises as fs } from "fs";
 import { homedir } from "os";
 import { join } from "path";
 import type { StreamMessage } from "../types.js";
-import { loadApiSettings } from "./settings-store.js";
-import { getTools } from "./tools-definitions.js";
-import type { DistillResult, MiniWorkflow, MiniWorkflowSummary, StepSpec } from "../../shared/mini-workflow-types.js";
+import type { DistillResult, MiniWorkflow, MiniWorkflowSummary, ChainStep, ValidationConfig } from "../../shared/mini-workflow-types.js";
 export type { DistillResult, MiniWorkflow, MiniWorkflowSummary } from "../../shared/mini-workflow-types.js";
 
-export type ToolUseMessage = {
-  id: string;
-  name: string;
-  input: Record<string, unknown>;
-};
-
-export type ToolResultMessage = {
-  tool_use_id: string;
-  output: unknown;
-  is_error?: boolean;
-};
-
-export type ToolTracePair = {
-  tool_use: ToolUseMessage;
-  tool_result: ToolResultMessage | null;
-};
-
-export function extractToolTrace(messages: StreamMessage[]): ToolTracePair[] {
-  const pending = new Map<string, ToolUseMessage>();
-  const ordered: ToolTracePair[] = [];
-  for (const msg of messages as Array<any>) {
-    if (msg?.type === "tool_use") {
-      const toolUse: ToolUseMessage = { id: String(msg.id), name: String(msg.name), input: (msg.input as Record<string, unknown>) ?? {} };
-      pending.set(toolUse.id, toolUse);
-      ordered.push({ tool_use: toolUse, tool_result: null });
-      continue;
-    }
-    if (msg?.type === "tool_result" && msg.tool_use_id) {
-      const toolUseId = String(msg.tool_use_id);
-      const result: ToolResultMessage = { tool_use_id: toolUseId, output: msg.output, is_error: Boolean(msg.is_error) };
-      const index = ordered.findIndex((p) => p.tool_use.id === toolUseId);
-      if (index >= 0) {
-        ordered[index] = { tool_use: ordered[index].tool_use, tool_result: result };
-      } else if (pending.has(toolUseId)) {
-        ordered.push({ tool_use: pending.get(toolUseId)!, tool_result: result });
-      }
-    }
-  }
-  return ordered;
-}
-
-function stableStringify(value: unknown): string {
-  if (Array.isArray(value)) {
-    return `[${value.map((v) => stableStringify(v)).join(",")}]`;
-  }
-  if (!value || typeof value !== "object") {
-    return JSON.stringify(value);
-  }
-  const keys = Object.keys(value as Record<string, unknown>).sort();
-  const obj = value as Record<string, unknown>;
-  return `{${keys.map((k) => `${JSON.stringify(k)}:${stableStringify(obj[k])}`).join(",")}}`;
-}
-
-export function filterFailedRetries(trace: ToolTracePair[]): ToolTracePair[] {
-  return trace.filter((item, idx) => {
-    if (!item.tool_result?.is_error) return true;
-    const signature = `${item.tool_use.name}::${stableStringify(item.tool_use.input)}`;
-    for (let i = idx + 1; i < trace.length; i++) {
-      const next = trace[i];
-      const nextSig = `${next.tool_use.name}::${stableStringify(next.tool_use.input)}`;
-      if (nextSig === signature && next.tool_result && !next.tool_result.is_error) {
-        return false;
-      }
-    }
-    return true;
-  });
-}
-
-export function checkDistillability(messages: StreamMessage[]): { suitable: boolean; reason?: string; suggest_prompt_preset?: boolean } {
-  const hasToolUse = (messages as Array<any>).some((m) => m?.type === "tool_use");
-  if (!hasToolUse) {
-    return { suitable: false, reason: "no_tool_calls", suggest_prompt_preset: true };
-  }
-  return { suitable: true };
-}
-
-export function resolveTemplate<T>(template: T, context: { inputs?: Record<string, unknown>; steps?: Record<string, Record<string, unknown>> }): T {
-  const replaceInString = (value: string): unknown => {
-    const pure = value.match(/^\{\{([^}]+)\}\}$/);
-    const resolveRef = (refPath: string): unknown => {
-      const path = refPath.trim();
-      if (path.startsWith("inputs.")) return context.inputs?.[path.slice("inputs.".length)];
-      if (path.startsWith("steps.")) {
-        const parts = path.split(".");
-        if (parts.length >= 4 && parts[2] === "outputs") {
-          const stepId = parts[1];
-          const outputName = parts.slice(3).join(".");
-          return context.steps?.[stepId]?.[outputName];
-        }
-      }
-      return `{{${path}}}`;
-    };
-    if (pure) return resolveRef(pure[1]);
-    return value.replace(/\{\{([^}]+)\}\}/g, (_, p1) => String(resolveRef(String(p1)) ?? ""));
-  };
-  if (typeof template === "string") return replaceInString(template) as T;
-  if (Array.isArray(template)) return template.map((v) => resolveTemplate(v, context)) as T;
-  if (template && typeof template === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [key, val] of Object.entries(template as Record<string, unknown>)) {
-      out[key] = resolveTemplate(val, context);
-    }
-    return out as T;
-  }
-  return template;
-}
-
-export function redactSecrets<T>(payload: T, secretFields: Set<string>, secretValues: string[] = []): T {
-  const redactString = (value: string): string => {
-    let next = value;
-    for (const s of secretValues) {
-      if (!s) continue;
-      next = next.split(s).join("[REDACTED]");
-    }
-    return next;
-  };
-  if (typeof payload === "string") return redactString(payload) as T;
-  if (Array.isArray(payload)) return payload.map((v) => redactSecrets(v, secretFields, secretValues)) as T;
-  if (payload && typeof payload === "object") {
-    const out: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
-      if (secretFields.has(k)) out[k] = "[REDACTED]";
-      else out[k] = redactSecrets(v, secretFields, secretValues);
-    }
-    return out as T;
-  }
-  return payload;
-}
-
-export function validateWorkflow(workflow: Record<string, unknown>): { valid: boolean; errors: string[] } {
-  const required = ["id", "name", "description", "version", "goal", "definition_of_done", "inputs", "steps", "tests", "artifacts", "safety"];
-  const errors: string[] = [];
-  for (const field of required) {
-    if (!(field in workflow)) errors.push(`missing required field: ${field}`);
-  }
-  if (typeof workflow.id !== "string") errors.push("id must be string");
-  if (typeof workflow.name !== "string") errors.push("name must be string");
-  if (!Array.isArray(workflow.inputs)) errors.push("inputs must be array");
-  if (!Array.isArray(workflow.steps)) errors.push("steps must be array");
-  if (!Array.isArray(workflow.tests)) errors.push("tests must be array");
-  if (!Array.isArray(workflow.artifacts)) errors.push("artifacts must be array");
-  if (!workflow.safety || typeof workflow.safety !== "object") errors.push("safety must be object");
-
-  const inputs = Array.isArray(workflow.inputs) ? workflow.inputs : [];
-  for (const input of inputs as Array<any>) {
-    if (typeof input?.id !== "string") errors.push("input.id must be string");
-    if (typeof input?.type !== "string") errors.push(`input ${String(input?.id)}: type must be string`);
-    if (typeof input?.required !== "boolean") errors.push(`input ${String(input?.id)}: required must be boolean`);
-    if (input?.type === "enum" && !Array.isArray(input?.enum_values)) {
-      errors.push(`input ${String(input?.id)}: enum requires enum_values`);
-    }
-  }
-  const steps = Array.isArray(workflow.steps) ? workflow.steps : [];
-  for (const step of steps as Array<any>) {
-    if (typeof step?.id !== "string") errors.push("step.id must be string");
-    if (!["tool", "llm", "manual"].includes(String(step?.kind))) errors.push(`step ${String(step?.id)}: invalid kind`);
-    if (!Array.isArray(step?.outputs)) errors.push(`step ${String(step?.id)}: outputs must be array`);
-    if (!step?.on_error || typeof step.on_error !== "object") errors.push(`step ${String(step?.id)}: on_error required`);
-    if (step?.on_error?.strategy === "retry") {
-      if (typeof step.on_error.max_retries !== "number") errors.push(`step ${step.id}: retry strategy requires max_retries`);
-      else if (step.on_error.max_retries > 3) errors.push(`step ${step.id}: max_retries must be <= 3`);
-    }
-  }
-  const tests = Array.isArray(workflow.tests) ? workflow.tests : [];
-  for (const test of tests as Array<any>) {
-    if (typeof test?.id !== "string") errors.push("test.id must be string");
-    if (!test?.kind) errors.push(`test ${String(test?.id)}: kind required`);
-    if (!test?.params || typeof test.params !== "object") errors.push(`test ${String(test?.id)}: params must be object`);
-  }
-  const safety = workflow.safety as any;
-  if (safety) {
-    if (!["ask", "auto"].includes(String(safety.permission_mode_on_replay))) errors.push("safety.permission_mode_on_replay invalid");
-    if (!["offline", "allow_web_read", "allow_web_write"].includes(String(safety.network_policy))) errors.push("safety.network_policy invalid");
-    if (!Array.isArray(safety.side_effects)) errors.push("safety.side_effects must be array");
-  }
-  return { valid: errors.length === 0, errors };
-}
+// ─── Utility helpers ───
 
 function slugify(input: string): string {
   return input
@@ -223,20 +45,527 @@ function dedupeById(workflows: MiniWorkflowSummary[]): MiniWorkflowSummary[] {
   return Array.from(map.values()).sort((a, b) => (a.updated_at < b.updated_at ? 1 : -1));
 }
 
+// ─── Template resolution (for replay prompt rendering) ───
+
+export function renderTemplate(template: string, context: { inputs: Record<string, unknown>; steps: Record<string, { result: string }> }): string {
+  return template.replace(/\{\{([^}]+)\}\}/g, (_, ref: string) => {
+    const path = ref.trim();
+    if (path.startsWith("inputs.")) {
+      const key = path.slice("inputs.".length);
+      return String(context.inputs[key] ?? "");
+    }
+    if (path.startsWith("steps.")) {
+      const parts = path.split(".");
+      // {{steps.step_id.result}}
+      if (parts.length >= 3) {
+        const stepId = parts[1];
+        const field = parts.slice(2).join(".");
+        if (field === "result") return context.steps[stepId]?.result ?? "";
+      }
+    }
+    return `{{${path}}}`;
+  });
+}
+
+// ─── Secret redaction ───
+
+export function redactSecrets<T>(payload: T, secretFields: Set<string>): T {
+  if (typeof payload === "string") return payload as T;
+  if (Array.isArray(payload)) return payload.map((v) => redactSecrets(v, secretFields)) as T;
+  if (payload && typeof payload === "object") {
+    const out: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(payload as Record<string, unknown>)) {
+      if (secretFields.has(k)) out[k] = "[REDACTED]";
+      else out[k] = redactSecrets(v, secretFields);
+    }
+    return out as T;
+  }
+  return payload;
+}
+
+// ─── Distillability check ───
+
+export function checkDistillability(messages: StreamMessage[]): { suitable: boolean; reason?: string; suggest_prompt_preset?: boolean } {
+  const hasToolUse = (messages as Array<any>).some((m) => m?.type === "tool_use");
+  if (!hasToolUse) {
+    return { suitable: false, reason: "no_tool_calls", suggest_prompt_preset: true };
+  }
+  return { suitable: true };
+}
+
+// ─── Concise history builder (shared by distill steps) ───
+
+export function buildConciseHistory(messages: StreamMessage[], limit = 120): any[] {
+  return (messages as Array<any>)
+    .filter((m) => ["user_prompt", "tool_use", "tool_result", "text"].includes(String(m?.type)))
+    .slice(-limit);
+}
+
+// ─── Distill Step 1: Identify result ───
+
+export const DISTILL_STEP1_SYSTEM = `Ты анализируешь историю сессии AI-агента с пользователем.
+
+Задача: определи, что стало ФИНАЛЬНЫМ РЕЗУЛЬТАТОМ сессии — артефакт, который пользователь принял.
+
+Признаки результата:
+- Файл, созданный через write_file / edit_file / execute_python (savefig, to_csv и т.д.)
+- Данные, скачанные и обработанные агентом (графики, таблицы, отчёты)
+- Текст/таблица/отчёт, который ассистент представил как итог работы
+
+ВАЖНО — различай ОСНОВНУЮ РАБОТУ и МЕТА-ОБСУЖДЕНИЕ:
+- Если сессия сначала ДЕЛАЛА работу (скачивала данные, строила графики, создавала файлы), а потом пользователь спрашивал "что ты сделал?" / "опиши результат" — результат сессии это СОЗДАННЫЕ АРТЕФАКТЫ (файлы, графики, данные), а НЕ мета-описание работы.
+- "Мета" вопросы в конце сессии (описание работы, ревью, пояснения) — это НЕ результат, а обсуждение результата.
+- Ищи ПЕРВИЧНЫЕ артефакты: файлы, графики, данные, код — то, ради чего сессия была начата.
+
+Ответь JSON (без markdown-обёртки):
+{
+  "result_clear": true | false,
+  "result_description": "краткое описание артефакта-результата (что СОЗДАНО, а не что обсуждалось)",
+  "result_type": "file" | "text" | "table" | "link" | "code" | "other",
+  "result_requirements": "требования, которые пользователь явно или неявно предъявлял к результату (формат, содержание, ограничения)",
+  "primary_artifacts": ["список созданных файлов/артефактов, если видны в истории"],
+  "reason": "если result_clear=false — почему результат неясен"
+}`;
+
+export function buildDistillStep1User(sessionId: string, cwd: string, history: any[]): string {
+  return `Session ID: ${sessionId}\nCWD: ${cwd}\n\nHistory JSON:\n${JSON.stringify(history)}`;
+}
+
+// ─── Distill Step 2: Extract variables/inputs ───
+
+export const DISTILL_STEP2_SYSTEM = `Ты анализируешь историю сессии AI-агента.
+
+Контекст: результат сессии уже определён (см. user message).
+
+Задача: найди все ПЕРЕМЕННЫЕ ВЕЛИЧИНЫ — значения, которые при повторном запуске могут измениться, НЕ меняя логику задачи.
+
+Примеры переменных: имя файла, тема отчёта, период дат, ФИО, URL, валюта, язык.
+НЕ переменные: имена инструментов, структура промпта, формат вывода.
+
+ВАЖНО: выделяй только СУЩЕСТВЕННЫЕ параметры, которые пользователь РЕАЛЬНО захочет менять при повторном запуске.
+НЕ выделяй:
+- session_id, workspace/cwd пути — это системные переменные, не параметры задачи
+- Промежуточные результаты и вычисляемые значения (source: "computed") — не включай их вообще
+- Технические детали реализации (имена переменных, форматы данных)
+- Историю сессии (history, messages, контекст) — это ВНУТРЕННИЕ данные системы, пользователь их не видит и не вводит
+- JSON-данные, массивы объектов, структуры данных — это НЕ пользовательские параметры
+
+Типичные СУЩЕСТВЕННЫЕ параметры: тема/предмет анализа, период дат, целевая валюта, язык отчёта, формат вывода.
+Обычно 1-4 параметра, не больше. Лучше меньше, но точнее.
+Параметр должен быть ПРОСТЫМ значением, которое человек вводит в форму (строка, число, дата, URL).
+
+Для каждой переменной определи:
+- source: "user_input" — нужно спросить у пользователя ДО запуска (станет Input)
+- source: "computed" — вычисляется в ходе работы (результат tool call или LLM)
+- source: "constant" — фиксированная часть логики
+
+Ответь JSON (без markdown-обёртки):
+{
+  "variables": [
+    {
+      "id": "snake_case_id",
+      "title": "Человекочитаемое название",
+      "description": "Что это за параметр",
+      "type": "string | number | date | url | file_path | secret | boolean | enum | text",
+      "source": "user_input | computed | constant",
+      "value_in_session": "значение из текущей сессии",
+      "enum_values": ["только", "для", "enum"]
+    }
+  ]
+}`;
+
+export function buildDistillStep2User(sessionId: string, cwd: string, history: any[], resultAnalysis: any): string {
+  return `Session ID: ${sessionId}\nCWD: ${cwd}\n\nРезультат сессии:\n${JSON.stringify(resultAnalysis)}\n\nHistory JSON:\n${JSON.stringify(history)}`;
+}
+
+// ─── Distill Step 3: Build chain of prompts ───
+
+export const DISTILL_STEP3_SYSTEM = `Ты создаёшь мини-приложение (chain of prompts) из истории сессии AI-агента.
+
+Контекст: результат сессии и входные параметры уже определены (см. user message).
+
+Задача: построить ЦЕПОЧКУ ПРОМПТОВ (chain), которая ВОСПРОИЗВОДИТ РАБОТУ оригинальной сессии:
+- Каждый шаг — один сфокусированный промпт для AI-агента, который ВЫПОЛНЯЕТ конкретное действие
+- Оркестратор (код, не LLM) последовательно выполняет шаги
+- Результат каждого шага передаётся в следующий через {{steps.step_id.result}}
+- Входные данные пользователя доступны через {{inputs.variable_id}}
+
+ГЛАВНЫЙ ПРИНЦИП: цепочка должна ДЕЛАТЬ ТУ ЖЕ РАБОТУ, что делала оригинальная сессия.
+Если оригинальная сессия скачивала данные с API, строила графики, создавала CSV — цепочка должна делать ТО ЖЕ САМОЕ.
+Цепочка НЕ должна "описывать" или "перечислять" что было сделано — она должна ВЫПОЛНЯТЬ действия.
+
+Правила построения цепочки:
+1. Проанализируй историю и найди ОПТИМАЛЬНЫЙ путь к результату (убери отладочные/лишние шаги)
+2. Каждый шаг должен быть СФОКУСИРОВАН на одной подзадаче
+3. Промпт шага должен быть ПОЛНОЙ инструкцией (не "продолжи", а конкретное задание)
+4. 3-7 шагов для типичной задачи
+5. Для каждого шага укажи какие tools нужны
+
+КРИТИЧЕСКИ ВАЖНО для prompt_template:
+- Промпт каждого шага должен описывать КОНКРЕТНОЕ ДЕЙСТВИЕ: скачать данные с API, обработать таблицу, построить график и т.д.
+- НЕ ссылайся на "историю сессии", "history_json", "контекст разговора" — агент при реплее НЕ будет иметь историю оригинальной сессии
+- Агент получает ТОЛЬКО входные параметры ({{inputs.*}}) и результаты предыдущих шагов ({{steps.*.result}})
+- Если в оригинальной сессии агент вызывал API — промпт должен сказать "Вызови API по URL..." а не "Проанализируй данные из сессии"
+- Промпт должен быть САМОДОСТАТОЧНЫМ — содержать все URL, форматы, структуры данных, нужные для выполнения
+- НЕ создавай шаги типа "опиши что было сделано" или "составь отчёт о блоках кода" — это мета-задачи, а не реальная работа
+
+Также создай:
+- validation: финальный промпт для проверки и доведения результата
+- acceptance_criteria: критерии приёмки (из требований к результату)
+- name, description, goal, icon для мини-приложения
+- constraints: ограничения (если есть)
+
+ВАЖНО для name, description, goal:
+- НЕ включай конкретные значения параметров из сессии (даты, имена файлов, темы)
+- Используй ОБЩИЕ формулировки. Пример: "Анализ новостного влияния на курсы валют" а НЕ "Анализ влияния новостей на USD/RUB и BTC/RUB за 90 дней"
+- Параметры должны быть в inputs, а не в названии
+
+Ответь JSON (без markdown-обёртки):
+{
+  "id": "slug-id",
+  "name": "Название мини-приложения",
+  "description": "Краткое описание",
+  "icon": "эмодзи",
+  "goal": "Цель задачи",
+  "definition_of_done": "Критерии готовности",
+  "constraints": ["ограничение1"],
+  "chain": [
+    {
+      "id": "step_1",
+      "title": "Название шага",
+      "prompt_template": "Полная инструкция для агента. Входные данные: {{inputs.topic}}...",
+      "tools": ["search_web", "read_file"],
+      "output_key": "research"
+    },
+    {
+      "id": "step_2",
+      "title": "Название шага",
+      "prompt_template": "На основе данных:\\n{{steps.step_1.result}}\\n\\nСоздай...",
+      "tools": ["write_file"],
+      "output_key": "draft"
+    }
+  ],
+  "validation": {
+    "acceptance_criteria": "Чёткие критерии приёмки результата",
+    "prompt_template": "Цель задачи: ...\\nТребования: ...\\nТекущий результат:\\n{{steps.LAST_STEP.result}}\\n\\nПроверь результат по критериям. Если есть проблемы — исправь. Если всё ок — выведи финальный результат.",
+    "tools": ["read_file", "write_file", "edit_file"],
+    "max_fix_attempts": 3
+  },
+  "artifacts": [
+    { "type": "file|text|link|table", "title": "Название файла/артефакта", "description": "Подробное описание содержимого, формата и структуры — будет использовано для сверки результата с эталоном" }
+  ],
+  "tools_required": ["search_web", "write_file"]
+}`;
+
+export function buildDistillStep3User(
+  sessionId: string,
+  cwd: string,
+  history: any[],
+  resultAnalysis: any,
+  variablesAnalysis: any
+): string {
+  return `Session ID: ${sessionId}\nCWD: ${cwd}\n\nРезультат сессии:\n${JSON.stringify(resultAnalysis)}\n\nВходные параметры (variables):\n${JSON.stringify(variablesAnalysis)}\n\nHistory JSON:\n${JSON.stringify(history)}`;
+}
+
+// ─── Distill Step 4: Scriptify deterministic steps ───
+
+export const DISTILL_STEP4_SYSTEM = `Ты оптимизируешь мини-приложение, заменяя детерминированные шаги Python-скриптами.
+
+КОНТЕКСТ:
+- Цепочка промптов (chain) уже построена.
+- Тебе даны РЕАЛЬНЫЕ фрагменты кода, которые агент выполнял в оригинальной сессии (execute_python блоки).
+- Твоя задача — взять этот РЕАЛЬНЫЙ код и превратить его в автономные Python-скрипты.
+
+КРИТИЧЕСКИ ВАЖНО:
+Скрипты должны ВОСПРОИЗВОДИТЬ ДЕЙСТВИЯ из оригинальной сессии:
+- Если агент вызывал API (requests.get("https://...")) — скрипт должен вызывать тот же API
+- Если агент делал pandas-трансформации — скрипт должен делать те же трансформации
+- Если агент строил график matplotlib — скрипт должен строить такой же график
+- Если агент парсил HTML/XML — скрипт должен парсить так же
+
+НЕ ДЕЛАЙ:
+- НЕ пиши скрипты, которые АНАЛИЗИРУЮТ историю сессии или JSON-данные сессии
+- НЕ пиши скрипты, которые парсят STEP_*_RESULT как "историю" — это результат ПРЕДЫДУЩЕГО шага цепочки
+- НЕ путай входные данные задачи (API URL, параметры) с метаданными сессии
+
+Шаг МОЖНО заскриптовать если он:
+- Скачивает данные по API (fetch URL, парсинг JSON/CSV/HTML)
+- Выполняет математические/статистические вычисления
+- Форматирует/трансформирует данные (merge, pivot, filter)
+- Генерирует файлы по шаблону (CSV, JSON)
+- Строит графики (matplotlib, plotly)
+
+Шаг НЕЛЬЗЯ заскриптовать если он:
+- Требует "творческого" анализа, написания текста, принятия решений
+- Зависит от неструктурированного контекста
+- Требует интерпретации результатов
+
+ПРАВИЛА написания скриптов:
+1. Бери РЕАЛЬНЫЙ код из execute_python блоков и адаптируй его:
+   - Параметризуй жёстко зашитые значения через переменные окружения
+   - INPUTS_<id> — пользовательские параметры (напр. INPUTS_topic, INPUTS_date_from)
+   - STEP_<id>_RESULT — результат предыдущего скриптового шага (строка/JSON)
+2. Скрипт должен быть ПОЛНЫМ и РАБОЧИМ (все импорты, все вычисления)
+3. Результат — в stdout (print/sys.stdout.write)
+4. Обработка ошибок: try/except с понятными сообщениями
+5. Библиотеки: стандартные + requests, pandas, matplotlib, numpy, beautifulsoup4
+
+Ответь JSON (без markdown-обёртки):
+{
+  "scripts": [
+    {
+      "step_id": "id шага из chain",
+      "language": "python",
+      "code": "полный Python-код скрипта",
+      "reason": "почему этот шаг можно заскриптовать"
+    }
+  ],
+  "kept_as_llm": [
+    {
+      "step_id": "id шага",
+      "reason": "почему этот шаг нельзя заскриптовать"
+    }
+  ]
+}`;
+
+export function buildDistillStep4User(chain: any[], inputs: any[], history: any[]): string {
+  // Extract actual execute_python code blocks from history so the LLM can
+  // see what the agent REALLY did (not raw history JSON)
+  const codeBlocks: { index: number; explanation?: string; code: string }[] = [];
+  for (let i = 0; i < history.length; i++) {
+    const m = history[i];
+    if (m?.type === "tool_use" && m?.name === "execute_python" && m?.input?.code) {
+      codeBlocks.push({
+        index: i,
+        explanation: m.input.explanation || undefined,
+        code: m.input.code
+      });
+    }
+  }
+
+  let codeSection: string;
+  if (codeBlocks.length > 0) {
+    codeSection = codeBlocks.map((b, idx) => {
+      const header = `--- Блок ${idx + 1}${b.explanation ? ` (${b.explanation})` : ""} ---`;
+      return `${header}\n${b.code}`;
+    }).join("\n\n");
+  } else {
+    codeSection = "(execute_python блоки не найдены в истории)";
+  }
+
+  return `Цепочка шагов (chain):\n${JSON.stringify(chain, null, 2)}\n\nВходные параметры:\n${JSON.stringify(inputs)}\n\nРЕАЛЬНЫЙ код, выполненный агентом в оригинальной сессии (execute_python блоки):\n${codeSection}`;
+}
+
+// ─── Assemble MiniWorkflow from distill step 3 output ───
+
+export function assembleWorkflow(
+  step3Output: any,
+  variablesAnalysis: any,
+  sessionId: string,
+  cwd?: string,
+  step4Output?: any
+): MiniWorkflow {
+  const now = new Date().toISOString();
+  const userInputVars = (variablesAnalysis.variables || []).filter((v: any) => v.source === "user_input");
+
+  const inputs = userInputVars.map((v: any) => ({
+    id: v.id,
+    title: v.title || v.id,
+    description: v.description || "",
+    type: v.type || "string",
+    required: true,
+    default: v.value_in_session,
+    enum_values: v.enum_values,
+    redaction: /(token|secret|key|password)/i.test(v.id)
+  }));
+
+  // Build scripts map from step 4
+  const scriptsMap = new Map<string, { language: string; code: string }>();
+  if (step4Output?.scripts) {
+    for (const s of step4Output.scripts) {
+      if (s.step_id && s.code) {
+        scriptsMap.set(s.step_id, { language: s.language || "python", code: s.code });
+      }
+    }
+  }
+
+  const chain: ChainStep[] = (step3Output.chain || []).map((s: any) => {
+    const script = scriptsMap.get(s.id);
+    return {
+      id: s.id,
+      title: s.title || s.id,
+      prompt_template: s.prompt_template || "",
+      tools: Array.isArray(s.tools) ? s.tools : [],
+      output_key: s.output_key || s.id,
+      execution: script ? "script" as const : "llm" as const,
+      ...(script ? { script: { language: script.language as "python" | "javascript", code: script.code } } : {})
+    };
+  });
+
+  const validation: ValidationConfig = {
+    acceptance_criteria: step3Output.validation?.acceptance_criteria || step3Output.definition_of_done || "",
+    prompt_template: step3Output.validation?.prompt_template || "",
+    tools: Array.isArray(step3Output.validation?.tools) ? step3Output.validation.tools : [],
+    max_fix_attempts: step3Output.validation?.max_fix_attempts ?? 3
+  };
+
+  const toolsRequired = Array.from(new Set([
+    ...chain.flatMap(s => s.tools),
+    ...validation.tools,
+    ...(step3Output.tools_required || [])
+  ]));
+
+  return {
+    id: step3Output.id || slugify(step3Output.name || "workflow"),
+    name: step3Output.name || "Mini-workflow",
+    description: step3Output.description || "",
+    icon: step3Output.icon || "🧩",
+    version: "0.1.0",
+    created_at: now,
+    updated_at: now,
+    source_session_id: sessionId,
+    source_session_cwd: cwd,
+    tags: ["distilled"],
+    status: "draft",
+    compatibility: {
+      valedesk_min_version: "0.0.8",
+      tools_required: toolsRequired,
+      tools_optional: []
+    },
+    goal: step3Output.goal || "",
+    definition_of_done: step3Output.definition_of_done || validation.acceptance_criteria,
+    constraints: Array.isArray(step3Output.constraints) ? step3Output.constraints : [],
+    inputs,
+    chain,
+    validation,
+    artifacts: Array.isArray(step3Output.artifacts) ? step3Output.artifacts : [],
+    safety: {
+      permission_mode_on_replay: "ask",
+      side_effects: [],
+      network_policy: "allow_web_read"
+    }
+  };
+}
+
+// ─── Validation ───
+
+export function validateWorkflow(workflow: Record<string, unknown>): { valid: boolean; errors: string[] } {
+  const errors: string[] = [];
+  const required = ["id", "name", "version", "goal", "definition_of_done", "inputs", "chain", "validation", "artifacts", "safety"];
+  for (const field of required) {
+    if (!(field in workflow)) errors.push(`missing required field: ${field}`);
+  }
+  if (typeof workflow.id !== "string") errors.push("id must be string");
+  if (typeof workflow.name !== "string") errors.push("name must be string");
+  if (!Array.isArray(workflow.inputs)) errors.push("inputs must be array");
+  if (!Array.isArray(workflow.chain)) errors.push("chain must be array");
+  if (!Array.isArray(workflow.artifacts)) errors.push("artifacts must be array");
+  if (!workflow.safety || typeof workflow.safety !== "object") errors.push("safety must be object");
+  if (!workflow.validation || typeof workflow.validation !== "object") errors.push("validation must be object");
+
+  const chain = Array.isArray(workflow.chain) ? workflow.chain : [];
+  for (const step of chain as Array<any>) {
+    if (typeof step?.id !== "string") errors.push("chain step: id must be string");
+    if (typeof step?.prompt_template !== "string") errors.push(`chain step ${step?.id}: prompt_template must be string`);
+    if (!Array.isArray(step?.tools)) errors.push(`chain step ${step?.id}: tools must be array`);
+  }
+
+  const safety = workflow.safety as any;
+  if (safety) {
+    if (!["ask", "auto"].includes(String(safety.permission_mode_on_replay))) errors.push("safety.permission_mode_on_replay invalid");
+    if (!["offline", "allow_web_read", "allow_web_write"].includes(String(safety.network_policy))) errors.push("safety.network_policy invalid");
+  }
+
+  return { valid: errors.length === 0, errors };
+}
+
+// ─── Replay prompt building ───
+
+export function buildReplayPrompt(workflow: MiniWorkflow, inputs: Record<string, unknown>): { prompt: string; redactedInputs: Record<string, unknown> } {
+  const secretFields = new Set(
+    workflow.inputs.filter((i) => i.type === "secret" || i.redaction).map((i) => i.id)
+  );
+
+  const inputLines = workflow.inputs.length > 0
+    ? workflow.inputs.map((i) => {
+        const val = inputs[i.id] ?? i.default ?? "";
+        const display = secretFields.has(i.id) ? `{{secret::${i.id}}}` : String(val);
+        return `- ${i.title}: ${display}`;
+      }).join("\n")
+    : "Входные данные не требуются.";
+
+  // Build context for template rendering
+  const templateContext = {
+    inputs: inputs as Record<string, unknown>,
+    steps: {} as Record<string, { result: string }>
+  };
+
+  const chainLines = workflow.chain
+    .filter((s) => s.execution !== "script") // skip scripted steps — they're pre-computed
+    .map((s, idx) => {
+      const expanded = renderTemplate(s.prompt_template, templateContext);
+      return `### Шаг ${idx + 1}: ${s.title}\n${expanded}`;
+    }).join("\n\n");
+
+  const constraintsText = workflow.constraints.length > 0
+    ? workflow.constraints.map(c => `- ${c}`).join("\n")
+    : "Нет дополнительных ограничений.";
+
+  // Merge DoD and acceptance_criteria to avoid duplication
+  const dodText = workflow.definition_of_done && workflow.validation.acceptance_criteria
+    && workflow.definition_of_done !== workflow.validation.acceptance_criteria
+    ? `${workflow.definition_of_done}\n${workflow.validation.acceptance_criteria}`
+    : workflow.validation.acceptance_criteria || workflow.definition_of_done || "";
+
+  // Build reference artifacts description for validation
+  const artifactsList = workflow.artifacts.length > 0
+    ? workflow.artifacts.map(a => `- ${a.title} (${a.type}): ${a.description}`).join("\n")
+    : "";
+  const referenceDir = workflow.source_session_cwd || "";
+
+  const prompt = `Выполни мини-приложение "${workflow.name}".
+
+Цель: ${workflow.goal}
+Входные данные:
+${inputLines}
+${workflow.constraints.length > 0 ? `\nОграничения:\n${constraintsText}\n` : ""}
+Пошаговый план:
+
+${chainLines}
+
+Критерии готовности: ${dodText}
+
+Валидация (до ${workflow.validation.max_fix_attempts} попыток):
+1. Проверь результат по критериям готовности
+2. ${referenceDir ? `Сравни с эталонным артефактом из оригинальной сессии (${referenceDir})` : "Сравни результат с описанием ожидаемых артефактов"}${artifactsList ? `:\n${artifactsList}` : ""}
+3. Если результат расходится с эталоном или не проходит критерии — исправь и повтори проверку`;
+
+  return {
+    prompt,
+    redactedInputs: redactSecrets(inputs, secretFields)
+  };
+}
+
+// ─── SKILL.md generation ───
+
 export async function generateSkillMarkdown(workflow: MiniWorkflow): Promise<string> {
-  const inputsYaml = workflow.inputs
-    .map((i) => `  - id: ${i.id}\n    title: "${i.title.replace(/"/g, '\\"')}"\n    description: "${(i.description || "").replace(/"/g, '\\"')}"\n    type: ${i.type}\n    required: ${i.required ? "true" : "false"}`)
-    .join("\n");
   const tools = workflow.compatibility.tools_required.map((t) => `"${t}"`).join(", ");
-  const stepsMd = workflow.steps
-    .map((s, idx) => `${idx + 1}. [${s.kind}] ${s.title}\n   - ${s.description}`)
+  const inputsYaml = workflow.inputs
+    .map((i) => `  - id: ${i.id}\n    title: "${i.title.replace(/"/g, '\\"')}"\n    type: ${i.type}\n    required: ${i.required ? "true" : "false"}`)
     .join("\n");
-  const constraintsMd = workflow.constraints.length > 0
-    ? workflow.constraints.map((c) => `- ${c}`).join("\n")
-    : "- Нет дополнительных ограничений.";
+
+  const chainMd = workflow.chain
+    .map((s, idx) => `${idx + 1}. **${s.title}**\n   Tools: ${s.tools.join(", ") || "none"}`)
+    .join("\n");
+
   const inputsMd = workflow.inputs.length > 0
     ? workflow.inputs.map((i) => `- \`${i.id}\` (${i.type})${i.required ? " [required]" : ""} — ${i.description || i.title}`).join("\n")
     : "- Нет входных параметров.";
+
+  const constraintsMd = workflow.constraints.length > 0
+    ? workflow.constraints.map((c) => `- ${c}`).join("\n")
+    : "- Нет дополнительных ограничений.";
+
   return `---
 name: ${workflow.name}
 description: ${workflow.description}
@@ -256,16 +585,18 @@ ${workflow.goal}
 ## Входные данные
 ${inputsMd}
 
-## Инструкция для агента
-${stepsMd || "1. Выполни задачу по цели и Definition of Done."}
+## Цепочка шагов
+${chainMd}
 
 ## Ограничения
 ${constraintsMd}
 
-## Definition of Done
-${workflow.definition_of_done}
+## Критерии готовности
+${workflow.definition_of_done || workflow.validation.acceptance_criteria}
 `;
 }
+
+// ─── Store: save / load / list / delete ───
 
 export async function saveNewVersion(workflow: MiniWorkflow, options?: { baseDir?: string }): Promise<{ versionFolder: string; totalVersions: number }> {
   const { skillsDir, workflowsDir } = baseDirs(options?.baseDir);
@@ -300,142 +631,6 @@ export async function saveNewVersion(workflow: MiniWorkflow, options?: { baseDir
     if (oldest !== undefined) await fs.rm(join(versionsDir, `v${oldest}`), { recursive: true, force: true });
   }
   return { versionFolder: `v${next}`, totalVersions: Math.min(nowNums.length, 5) };
-}
-
-function inferGoal(messages: StreamMessage[]): string {
-  const prompts = (messages as Array<any>).filter((m) => m?.type === "user_prompt").map((m) => String(m.prompt || "").trim()).filter(Boolean);
-  return prompts[0] || "Выполнить задачу с использованием инструментов.";
-}
-
-function inferDone(messages: StreamMessage[]): string {
-  const text = (messages as Array<any>).filter((m) => m?.type === "text").map((m) => String(m.text || ""));
-  const last = text[text.length - 1] || "";
-  if (/готов|создан|сохранен|completed|done/i.test(last)) return "Финальный результат сформирован без ошибок.";
-  return "Результат воспроизводится при повторном запуске.";
-}
-
-export function distillSessionToWorkflow(sessionId: string, messages: StreamMessage[], cwd?: string, clarification?: string): DistillResult {
-  const suitability = checkDistillability(messages);
-  if (!suitability.suitable) {
-    return {
-      status: "not_suitable",
-      reason: "Сессия не содержит вызовов инструментов.",
-      suggest_prompt_preset: Boolean(suitability.suggest_prompt_preset)
-    };
-  }
-  const trace = filterFailedRetries(extractToolTrace(messages)).filter((p) => p.tool_result && !p.tool_result.is_error);
-  if (trace.length === 0 && !clarification) {
-    return {
-      status: "needs_clarification",
-      questions: ["Был ли достигнут результат в этой сессии? Что именно является результатом?"]
-    };
-  }
-  const effectiveTrace = trace.length > 0
-    ? trace
-    : filterFailedRetries(extractToolTrace(messages)).filter((p) => p.tool_result);
-
-  const nameBase = effectiveTrace[effectiveTrace.length - 1].tool_use.name.replace(/_/g, " ");
-  const workflowId = slugify(nameBase);
-  const now = new Date().toISOString();
-  const toolsRequired = Array.from(new Set(effectiveTrace.map((t) => t.tool_use.name)));
-  const steps: StepSpec[] = effectiveTrace.map((pair, idx) => ({
-    id: `step_${idx + 1}_${pair.tool_use.name}`,
-    kind: "tool",
-    title: `${pair.tool_use.name}`,
-    description: `Вызов инструмента ${pair.tool_use.name}`,
-    outputs: [],
-    on_error: { strategy: "fail" },
-    tool_name: pair.tool_use.name,
-    args_template: pair.tool_use.input
-  }));
-
-  const promptTexts = (messages as Array<any>)
-    .filter((m) => m?.type === "user_prompt")
-    .map((m) => String(m.prompt || ""));
-  const promptCorpus = promptTexts.join("\n");
-  const candidateValues = new Map<string, string>();
-  for (const pair of effectiveTrace) {
-    for (const [argKey, argValue] of Object.entries(pair.tool_use.input || {})) {
-      if (typeof argValue !== "string") continue;
-      const value = argValue.trim();
-      if (!value || value.length < 3) continue;
-      if (promptCorpus.toLowerCase().includes(value.toLowerCase())) {
-        candidateValues.set(argKey, value);
-      }
-    }
-  }
-  const inputs = Array.from(candidateValues.entries()).map(([key, value]) => ({
-    id: key.replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase(),
-    title: key,
-    description: `Параметр "${key}" для повторного запуска.`,
-    type: value.startsWith("http://") || value.startsWith("https://") ? "url" : "string",
-    required: true,
-    default: value,
-    redaction: /(token|secret|key|password)/i.test(key)
-  })) as MiniWorkflow["inputs"];
-
-  const inputByKey = new Map(inputs.map((i) => [i.title, i]));
-  const parameterizedSteps: StepSpec[] = steps.map((step) => {
-    if (!step.args_template) return step;
-    const mapped: Record<string, unknown> = {};
-    for (const [k, v] of Object.entries(step.args_template)) {
-      const input = inputByKey.get(k);
-      mapped[k] = input ? `{{inputs.${input.id}}}` : v;
-    }
-    return { ...step, args_template: mapped };
-  });
-
-  const workflow: MiniWorkflow = {
-    id: workflowId,
-    name: nameBase.charAt(0).toUpperCase() + nameBase.slice(1),
-    description: "Автоматически выделенный mini-workflow из сессии.",
-    icon: "🧩",
-    version: "0.1.0",
-    created_at: now,
-    updated_at: now,
-    source_session_id: sessionId,
-    source_session_cwd: cwd,
-    tags: ["distilled"],
-    status: "draft",
-    compatibility: {
-      valedesk_min_version: "0.0.8",
-      tools_required: toolsRequired,
-      tools_optional: []
-    },
-    goal: clarification ? `Цель по уточнению пользователя: ${clarification}` : inferGoal(messages),
-    definition_of_done: inferDone(messages),
-    constraints: [],
-    inputs,
-    steps: parameterizedSteps,
-    tests: [
-      {
-        id: "tool_smoke_1",
-        title: `Tool smoke: ${toolsRequired[0]}`,
-        kind: "tool_smoke",
-        params: { tool_name: toolsRequired[0], test_args: {} },
-        severity: "blocking",
-        test_context: "session_cwd"
-      }
-    ],
-    artifacts: [
-      {
-        type: "text",
-        title: "Assistant output",
-        ref: "{{steps.step_1.outputs.result}}"
-      }
-    ],
-    safety: {
-      permission_mode_on_replay: "ask",
-      side_effects: [],
-      network_policy: "allow_web_read"
-    }
-  };
-
-  const validation = validateWorkflow(workflow as unknown as Record<string, unknown>);
-  if (!validation.valid) {
-    return { status: "needs_clarification", questions: validation.errors };
-  }
-  return { status: "success", workflow };
 }
 
 export class MiniWorkflowStore {
@@ -524,96 +719,14 @@ export class MiniWorkflowStore {
   }
 }
 
-export async function runMiniWorkflowTests(
-  workflow: MiniWorkflow,
-  context?: { sessionCwd?: string; tempRoot?: string }
-): Promise<{ passed: boolean; results: Array<{ id: string; title: string; kind: string; severity: "blocking" | "warning"; passed: boolean; message: string }> }> {
-  const results: Array<{ id: string; title: string; kind: string; severity: "blocking" | "warning"; passed: boolean; message: string }> = [];
-  const sessionCwd = context?.sessionCwd || workflow.source_session_cwd || process.cwd();
-  const tempRoot = context?.tempRoot ?? join(process.cwd(), ".tmp-miniworkflow-tests");
-  const isolatedDir = join(tempRoot, `run-${randomUUID()}`);
-  await fs.mkdir(isolatedDir, { recursive: true });
-  try {
-    for (const test of workflow.tests) {
-      let passed = true;
-      let message = "ok";
-      const testContext = test.test_context ?? "session_cwd";
-      const baseDir = testContext === "isolated" ? isolatedDir : sessionCwd;
-      try {
-        if (test.kind === "tool_smoke") {
-          const toolName = String(test.params?.tool_name || "");
-          const tools = getTools(loadApiSettings());
-          const available = new Set(tools.map((t) => t.function.name));
-          passed = Boolean(toolName) && available.has(toolName);
-          message = passed ? "tool available" : `tool unavailable: ${toolName}`;
-        } else if (test.kind === "file_exists") {
-          const pathValue = resolveTemplate(String(test.params?.path || ""), { inputs: {}, steps: {} });
-          await fs.access(join(baseDir, String(pathValue)));
-        } else if (test.kind === "file_contains") {
-          const pathValue = resolveTemplate(String(test.params?.path || ""), { inputs: {}, steps: {} });
-          const mustInclude = Array.isArray(test.params?.must_include) ? (test.params?.must_include as string[]) : [];
-          const content = await fs.readFile(join(baseDir, String(pathValue)), "utf8");
-          const missing = mustInclude.filter((m) => !content.includes(m));
-          passed = missing.length === 0;
-          message = missing.length ? `missing: ${missing.join(", ")}` : "content ok";
-        } else if (test.kind === "json_schema") {
-          const pathValue = resolveTemplate(String(test.params?.json_path || ""), { inputs: {}, steps: {} });
-          const raw = await fs.readFile(join(baseDir, String(pathValue)), "utf8");
-          JSON.parse(raw);
-        } else if (test.kind === "custom_llm_judge") {
-          passed = true;
-          message = "custom_llm_judge skipped in MVP runner";
-        }
-      } catch (error) {
-        passed = false;
-        message = String(error);
-      }
-      results.push({
-        id: test.id,
-        title: test.title,
-        kind: test.kind,
-        severity: test.severity,
-        passed,
-        message
-      });
-    }
-  } finally {
-    await fs.rm(isolatedDir, { recursive: true, force: true }).catch(() => undefined);
-  }
-  const blockingFailed = results.some((r) => r.severity === "blocking" && !r.passed);
-  return { passed: !blockingFailed, results };
-}
+// ─── Replay log ───
 
-export function buildReplayPrompt(workflow: MiniWorkflow, inputs: Record<string, unknown>): { prompt: string; redactedInputs: Record<string, unknown> } {
-  const secretFields = new Set(workflow.inputs.filter((i) => i.type === "secret" || i.redaction).map((i) => i.id));
-  const renderedInputs: Record<string, unknown> = {};
-  for (const input of workflow.inputs) {
-    const raw = inputs[input.id] ?? input.default ?? "";
-    renderedInputs[input.id] = secretFields.has(input.id) ? `{{secret::${input.id}}}` : raw;
-  }
-  const lines = Object.entries(renderedInputs).map(([k, v]) => `- ${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`);
-  const stepsLines = workflow.steps.map((s, idx) => `${idx + 1}. [${s.kind}] ${s.title} (${s.description})`);
-  return {
-    prompt: `Выполни mini-workflow "${workflow.name}".\n\nЦель:\n${workflow.goal}\n\nInputs:\n${lines.join("\n")}\n\nШаги:\n${stepsLines.join("\n")}\n\nDefinition of done:\n${workflow.definition_of_done}`,
-    redactedInputs: redactSecrets(inputs, secretFields)
-  };
-}
-
-export async function writeReplayLog(workflow: MiniWorkflow, payload: { inputs: Record<string, unknown>; final_status: "success" | "partial" | "failed" | "aborted"; step_results?: Array<{ step_id: string; status: "success" | "failed" | "skipped"; outputs?: unknown; error?: string | null; duration_ms?: number; started_at?: string; finished_at?: string }> }, options?: { baseDir?: string }): Promise<void> {
+export async function writeReplayLog(workflow: MiniWorkflow, payload: { inputs: Record<string, unknown>; final_status: "success" | "partial" | "failed" | "aborted"; step_results?: Array<{ step_id: string; status: string; duration_ms?: number }> }, options?: { baseDir?: string }): Promise<void> {
   const base = options?.baseDir ?? homedir();
   const runId = randomUUID();
   const runDir = join(base, ".valera", "workflows", workflow.id, "runs");
   try {
     await fs.mkdir(runDir, { recursive: true });
-    const results = (payload.step_results || []).map((s) => ({
-      step_id: s.step_id,
-      status: s.status,
-      started_at: s.started_at ?? new Date().toISOString(),
-      finished_at: s.finished_at ?? new Date().toISOString(),
-      duration_ms: s.duration_ms ?? 0,
-      outputs_hash: createHash("sha256").update(JSON.stringify(s.outputs ?? null)).digest("hex"),
-      error: s.error ?? null
-    }));
     const secretFields = new Set(workflow.inputs.filter((i) => i.type === "secret" || i.redaction).map((i) => i.id));
     const content = {
       run_id: runId,
@@ -622,7 +735,7 @@ export async function writeReplayLog(workflow: MiniWorkflow, payload: { inputs: 
       started_at: new Date().toISOString(),
       finished_at: new Date().toISOString(),
       inputs: redactSecrets(payload.inputs, secretFields),
-      step_results: results,
+      step_results: payload.step_results || [],
       final_status: payload.final_status
     };
     await fs.writeFile(join(runDir, `${runId}.json`), JSON.stringify(content, null, 2), "utf8");

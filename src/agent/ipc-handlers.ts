@@ -10,7 +10,9 @@ import { SchedulerService } from "./libs/scheduler-service.js";
 import { loadApiSettings, saveApiSettings } from "./libs/settings-store.js";
 import { generateSessionTitle } from "./libs/util.js";
 import { app } from "electron";
-import { join } from "path";
+import path from "path";
+const { join } = path;
+import { promises as fs } from "fs";
 import { sessionManager } from "./session-manager.js";
 import * as gitUtils from "./git-utils.js";
 import type { CreateTaskPayload, ThreadTask } from "./types.js";
@@ -19,7 +21,25 @@ import { loadLLMProviderSettings, saveLLMProviderSettings } from "./libs/llm-pro
 import { fetchModelsFromProvider, checkModelsAvailability, validateProvider, createProvider } from "./libs/llm-providers.js";
 import { loadSkillsSettings, saveSkillsSettings, toggleSkill, setMarketplaceUrl } from "./libs/skills-store.js";
 import { fetchSkillsFromMarketplace } from "./libs/skills-loader.js";
-import { MiniWorkflowStore, buildReplayPrompt, distillSessionToWorkflow, generateSkillMarkdown, runMiniWorkflowTests, validateWorkflow, writeReplayLog } from "./libs/mini-workflow.js";
+import {
+  MiniWorkflowStore,
+  buildReplayPrompt,
+  checkDistillability,
+  buildConciseHistory,
+  assembleWorkflow,
+  generateSkillMarkdown,
+  validateWorkflow,
+  writeReplayLog,
+  renderTemplate,
+  DISTILL_STEP1_SYSTEM,
+  DISTILL_STEP2_SYSTEM,
+  DISTILL_STEP3_SYSTEM,
+  DISTILL_STEP4_SYSTEM,
+  buildDistillStep1User,
+  buildDistillStep2User,
+  buildDistillStep3User,
+  buildDistillStep4User
+} from "./libs/mini-workflow.js";
 
 const DB_PATH = join(app.getPath("userData"), "sessions.db");
 const sessions = new SessionStore(DB_PATH);
@@ -108,62 +128,79 @@ function getLlmConnection(model?: string): { client: OpenAI; modelName: string }
   };
 }
 
-async function distillWithLLM(input: { sessionId: string; cwd?: string; history: any[]; model?: string }) {
-  const { client, modelName } = getLlmConnection(input.model);
-  const conciseHistory = input.history
-    .filter((m: any) => ["user_prompt", "tool_use", "tool_result", "text"].includes(String(m?.type)))
-    .slice(-120);
+// ─── Distill: 3-step LLM chain ───
+
+async function llmCall(client: OpenAI, modelName: string, system: string, user: string): Promise<any> {
   const response = await client.chat.completions.create({
     model: modelName,
     temperature: 0.1,
     messages: [
-      {
-        role: "system",
-        content:
-          "Ты Distiller для ValeDesk. Верни ТОЛЬКО валидный JSON MiniWorkflow без markdown. " +
-          "Обязательно поля: id,name,description,icon,version,created_at,updated_at,source_session_id,tags,status,compatibility,goal,definition_of_done,constraints,inputs,steps,tests,artifacts,safety. " +
-          "status=draft, version=0.1.0, safety.permission_mode_on_replay='ask', safety.network_policy='allow_web_read'."
-      },
-      {
-        role: "user",
-        content:
-          `Session ID: ${input.sessionId}\nCWD: ${input.cwd || ""}\n` +
-          "Построй workflow только по полезным шагам tool_use/tool_result. " +
-          "Если есть retries с одинаковым tool+args, оставь успешный. " +
-          "Добавь минимум 1 тест, минимум 1 artifact.\n\nHistory JSON:\n" +
-          JSON.stringify(conciseHistory)
-      }
+      { role: "system", content: system },
+      { role: "user", content: user }
     ]
   });
   const text = response.choices?.[0]?.message?.content || "";
   const jsonRaw = extractJsonObject(text);
-  if (!jsonRaw) throw new Error("Distill LLM returned non-JSON");
+  if (!jsonRaw) throw new Error("LLM returned non-JSON response");
   return JSON.parse(jsonRaw);
 }
 
-async function fixWorkflowWithLLM(input: { workflow: any; failedResults: Array<{ id: string; title: string; kind: string; message: string }>; attempt: number }) {
-  const { client, modelName } = getLlmConnection(undefined);
-  const response = await client.chat.completions.create({
-    model: modelName,
-    temperature: 0.1,
-    messages: [
-      {
-        role: "system",
-        content:
-          "Ты правишь JSON MiniWorkflow после провала тестов. Верни ТОЛЬКО валидный JSON без markdown. " +
-          "Сохрани исходную цель, исправь шаги/tests так, чтобы устранить ошибки."
-      },
-      {
-        role: "user",
-        content:
-          `Attempt: ${input.attempt}\nFailed tests:\n${JSON.stringify(input.failedResults, null, 2)}\n\nWorkflow:\n${JSON.stringify(input.workflow)}`
-      }
-    ]
-  });
-  const text = response.choices?.[0]?.message?.content || "";
-  const jsonRaw = extractJsonObject(text);
-  if (!jsonRaw) throw new Error("Fix LLM returned non-JSON");
-  return JSON.parse(jsonRaw);
+async function distillChain(input: { sessionId: string; cwd?: string; history: any[]; model?: string }): Promise<{ status: "success"; workflow: any } | { status: "not_suitable"; reason: string }> {
+  const { client, modelName } = getLlmConnection(input.model);
+  const conciseHistory = buildConciseHistory(input.history as any);
+
+  // Step 1: Identify result
+  console.log("[Distill] Step 1: Identifying session result...");
+  const step1 = await llmCall(
+    client, modelName,
+    DISTILL_STEP1_SYSTEM,
+    buildDistillStep1User(input.sessionId, input.cwd || "", conciseHistory)
+  );
+  console.log("[Distill] Step 1 result:", JSON.stringify(step1).slice(0, 500));
+
+  if (!step1.result_clear) {
+    return { status: "not_suitable", reason: step1.reason || "Результат сессии не определён однозначно." };
+  }
+
+  // Step 2: Extract variables
+  console.log("[Distill] Step 2: Extracting variables...");
+  const step2 = await llmCall(
+    client, modelName,
+    DISTILL_STEP2_SYSTEM,
+    buildDistillStep2User(input.sessionId, input.cwd || "", conciseHistory, step1)
+  );
+  console.log("[Distill] Step 2 result:", JSON.stringify(step2).slice(0, 500));
+
+  // Step 3: Build chain of prompts
+  console.log("[Distill] Step 3: Building prompt chain...");
+  const step3 = await llmCall(
+    client, modelName,
+    DISTILL_STEP3_SYSTEM,
+    buildDistillStep3User(input.sessionId, input.cwd || "", conciseHistory, step1, step2)
+  );
+  console.log("[Distill] Step 3 result:", JSON.stringify(step3).slice(0, 500));
+
+  // Step 4: Scriptify deterministic steps
+  console.log("[Distill] Step 4: Scriptifying deterministic steps...");
+  let step4: any = null;
+  try {
+    step4 = await llmCall(
+      client, modelName,
+      DISTILL_STEP4_SYSTEM,
+      buildDistillStep4User(step3.chain || [], step2.variables || [], conciseHistory)
+    );
+    const scriptCount = step4?.scripts?.length || 0;
+    const llmCount = step4?.kept_as_llm?.length || 0;
+    console.log(`[Distill] Step 4 result: ${scriptCount} scripted, ${llmCount} kept as LLM`);
+  } catch (err) {
+    console.warn("[Distill] Step 4 (scriptify) failed, all steps will use LLM:", err);
+  }
+
+  // Assemble final workflow
+  console.log("[Distill] Assembling workflow...");
+  const workflow = assembleWorkflow(step3, step2, input.sessionId, input.cwd, step4);
+  console.log("[Distill] Workflow assembled:", workflow.id, workflow.name);
+  return { status: "success", workflow };
 }
 
 // Broadcast function for events without sessionId (session.list, models.loaded, etc.)
@@ -813,6 +850,19 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
 
   if (event.type === "open.external") {
     shell.openExternal(event.payload.url);
+    return;
+  }
+
+  if (event.type === "open.path") {
+    let filePath = event.payload.path;
+    // Resolve relative paths against the active session's cwd
+    if (filePath && !path.isAbsolute(filePath)) {
+      const sessionId = sessionManager.getWindowSession(windowId);
+      const session = sessionId ? sessions.getSession(sessionId) : undefined;
+      const cwd = session?.cwd || process.cwd();
+      filePath = path.resolve(cwd, filePath);
+    }
+    shell.openPath(filePath);
     return;
   }
 
@@ -1494,7 +1544,7 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
   if (event.type === "miniworkflow.list") {
     const workflows = await miniWorkflowStore.list({
       projectCwd: event.payload?.cwd,
-      includeProject: Boolean(event.payload?.cwd)
+      includeProject: true
     });
     sessionManager.emitToWindow(windowId, {
       type: "miniworkflow.list",
@@ -1523,7 +1573,7 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
   }
 
   if (event.type === "miniworkflow.distill") {
-    const { sessionId, clarification } = event.payload;
+    const { sessionId } = event.payload;
     const history = sessions.getSessionHistory(sessionId);
     if (!history) {
       sessionManager.emitToWindow(windowId, {
@@ -1532,69 +1582,71 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
       });
       return;
     }
-    let result = distillSessionToWorkflow(sessionId, history.messages, history.session.cwd, clarification);
-    if (result.status === "success") {
-      try {
-        const llmWorkflow = await distillWithLLM({
-          sessionId,
-          cwd: history.session.cwd,
-          history: history.messages as any[],
-          model: history.session.model
-        });
-        llmWorkflow.source_session_id = sessionId;
-        llmWorkflow.source_session_cwd = history.session.cwd;
-        const validation = validateWorkflow(llmWorkflow as Record<string, unknown>);
-        if (validation.valid) {
-          result = { status: "success", workflow: llmWorkflow as any };
-        }
-      } catch {
-        // Fallback to deterministic distill result
-      }
-    }
-    sessionManager.emitToWindow(windowId, {
-      type: "miniworkflow.distill.result",
-      payload: { sessionId, result: result as any }
-    });
-    return;
-  }
 
-  if (event.type === "miniworkflow.test") {
-    const workflow = event.payload.workflow as any;
-    const validation = runMiniWorkflowTests(workflow, { sessionCwd: workflow.source_session_cwd });
-    const testResult = await validation;
-    sessionManager.emitToWindow(windowId, {
-      type: "miniworkflow.tests.result",
-      payload: { workflowId: workflow.id, passed: testResult.passed, results: testResult.results as any }
-    });
-    return;
-  }
-
-  if (event.type === "miniworkflow.fix") {
-    const { workflow, failedResults, attempt } = event.payload as any;
-    if (attempt >= 3) {
+    // Quick check: does session have tool calls?
+    const suitability = checkDistillability(history.messages);
+    if (!suitability.suitable) {
       sessionManager.emitToWindow(windowId, {
-        type: "miniworkflow.error",
-        payload: { message: "3 попытки доработки исчерпаны" }
+        type: "miniworkflow.distill.result",
+        payload: {
+          sessionId,
+          result: {
+            status: "not_suitable",
+            reason: "Сессия не содержит вызовов инструментов.",
+            suggest_prompt_preset: Boolean(suitability.suggest_prompt_preset)
+          }
+        }
       });
       return;
     }
-    let fixed = workflow;
+
+    // 3-step LLM distillation chain
     try {
-      fixed = await fixWorkflowWithLLM({ workflow, failedResults, attempt });
-      fixed.updated_at = new Date().toISOString();
-      const validation = validateWorkflow(fixed as Record<string, unknown>);
-      if (!validation.valid) {
-        fixed = workflow;
+      const chainResult = await distillChain({
+        sessionId,
+        cwd: history.session.cwd,
+        history: history.messages as any[],
+        model: history.session.model
+      });
+
+      if (chainResult.status === "not_suitable") {
+        sessionManager.emitToWindow(windowId, {
+          type: "miniworkflow.distill.result",
+          payload: {
+            sessionId,
+            result: { status: "not_suitable", reason: chainResult.reason, suggest_prompt_preset: false }
+          }
+        });
+        return;
       }
-    } catch {
-      // Best effort fallback: keep workflow as is.
+
+      const validation = validateWorkflow(chainResult.workflow as Record<string, unknown>);
+      if (!validation.valid) {
+        sessionManager.emitToWindow(windowId, {
+          type: "miniworkflow.distill.result",
+          payload: {
+            sessionId,
+            result: { status: "needs_clarification", questions: validation.errors }
+          }
+        });
+        return;
+      }
+
+      sessionManager.emitToWindow(windowId, {
+        type: "miniworkflow.distill.result",
+        payload: { sessionId, result: { status: "success", workflow: chainResult.workflow } }
+      });
+    } catch (err) {
+      console.error("[Distill] Error:", err);
+      sessionManager.emitToWindow(windowId, {
+        type: "miniworkflow.error",
+        payload: { message: `Distill failed: ${String(err)}` }
+      });
     }
-    sessionManager.emitToWindow(windowId, {
-      type: "miniworkflow.fix.result",
-      payload: { workflow: fixed, attempt: attempt + 1 }
-    });
     return;
   }
+
+  // miniworkflow.test and miniworkflow.fix removed — validation is now built into the replay prompt
 
   if (event.type === "miniworkflow.archive") {
     const wf = await miniWorkflowStore.load(event.payload.workflowId, {
@@ -1625,10 +1677,15 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
 
   if (event.type === "miniworkflow.save") {
     const workflow = event.payload.workflow as any;
-    await miniWorkflowStore.save(workflow as any, {
-      scope: event.payload.scope,
-      projectCwd: event.payload.cwd
-    });
+    // Always save globally so workflows are visible in all chats
+    await miniWorkflowStore.save(workflow as any, { scope: "global" });
+    // Also save to project if cwd is provided
+    if (event.payload.cwd) {
+      await miniWorkflowStore.save(workflow as any, {
+        scope: "project",
+        projectCwd: event.payload.cwd
+      });
+    }
     const workflows = await miniWorkflowStore.list({
       projectCwd: event.payload.cwd,
       includeProject: Boolean(event.payload.cwd)
@@ -1670,17 +1727,31 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
     }
 
     const inputs = event.payload.inputs || {};
-    const { prompt } = buildReplayPrompt(workflow as any, inputs);
-    const skillMarkdown = await generateSkillMarkdown(workflow as any);
-    const replayPrompt = `${prompt}\n\n---\nSKILL.md:\n${skillMarkdown}`;
     const firstInputValue = Object.values(inputs).find((v) => typeof v === "string" && String(v).trim().length > 0);
 
+    const workflowDir = join(workflow.source_session_cwd || event.payload.cwd || ".", ".valera", "workflows", workflow.id, "workspace");
+    // Clean workspace from previous runs to avoid agent wasting tokens on old files
+    await fs.rm(workflowDir, { recursive: true, force: true });
+    await fs.mkdir(workflowDir, { recursive: true });
+
+    // Create session IMMEDIATELY so user sees the new chat right away
     const session = sessions.createSession({
-      cwd: workflow.source_session_cwd,
+      cwd: workflowDir,
       title: `${workflow.name}${firstInputValue ? `: ${String(firstInputValue)}` : ""}`,
       allowedTools: workflow.compatibility.tools_required.join(","),
-      prompt: replayPrompt,
-      model: undefined
+      prompt: "",
+      model: event.payload.model || undefined
+    });
+    sessions.updateSession(session.id, { status: "running" });
+    sessionManager.setWindowSession(windowId, session.id);
+    // Notify UI immediately so it switches to the new chat
+    emit({
+      type: "session.status",
+      payload: { sessionId: session.id, status: "running", title: session.title, cwd: session.cwd }
+    });
+    sessionManager.emitToWindow(windowId, {
+      type: "miniworkflow.replay.started",
+      payload: { workflowId: workflow.id, sessionId: session.id }
     });
 
     const secretBag: Record<string, string> = {};
@@ -1690,15 +1761,75 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
         if (typeof v === "string" && v) secretBag[inputSpec.id] = v;
       }
     }
-    sessions.updateSession(session.id, { status: "running", lastPrompt: replayPrompt });
-    sessionManager.setWindowSession(windowId, session.id);
+
+    // Execute scripted steps — session is already visible, show progress via stream messages
+    const scriptResults: Record<string, string> = {};
+    const scriptSteps = (workflow as any).chain?.filter((s: any) => s.execution === "script" && s.script?.code) || [];
+    if (scriptSteps.length > 0) {
+      console.log(`[Replay] Executing ${scriptSteps.length} scripted steps...`);
+      const { execFile } = await import("child_process");
+      const { promisify } = await import("util");
+      const execFileAsync = promisify(execFile);
+
+      // Show progress in chat using system/notice format
+      const emitProgress = (text: string) => emit({
+        type: "stream.message",
+        payload: { sessionId: session.id, message: { type: "system", subtype: "notice", text } as any }
+      });
+      emitProgress(`⏳ Выполняю предварительные скрипты (${scriptSteps.length})...`);
+
+      for (const step of scriptSteps) {
+        try {
+          const env: Record<string, string> = Object.fromEntries(
+            Object.entries(process.env).filter((e): e is [string, string] => e[1] != null)
+          );
+          for (const [k, v] of Object.entries(inputs)) {
+            env[`INPUTS_${k.toUpperCase()}`] = String(v);
+          }
+          for (const [k, v] of Object.entries(scriptResults)) {
+            env[`STEP_${k.toUpperCase()}_RESULT`] = v;
+          }
+          env["WORKSPACE"] = workflowDir;
+
+          const scriptFile = join(workflowDir, `${step.id}.py`);
+          await fs.writeFile(scriptFile, step.script.code, "utf8");
+
+          emitProgress(`▸ ${step.title}...`);
+
+          const { stdout } = await execFileAsync("python", [scriptFile], {
+            cwd: workflowDir,
+            env,
+            timeout: 120_000,
+            maxBuffer: 10 * 1024 * 1024
+          });
+          scriptResults[step.id] = (stdout || "").trim();
+          console.log(`[Replay] Script step "${step.id}" completed (${(stdout || "").length} chars)`);
+        } catch (err: any) {
+          console.error(`[Replay] Script step "${step.id}" failed:`, err.message);
+          scriptResults[step.id] = `[SCRIPT ERROR: ${err.message}]`;
+        }
+      }
+
+      emitProgress(`✅ Скрипты выполнены. Запускаю агента...`);
+    }
+
+    // Build replay prompt with pre-computed script results
+    const { prompt: basePrompt } = buildReplayPrompt(workflow as any, inputs);
+    let replayPrompt = basePrompt;
+    if (Object.keys(scriptResults).length > 0) {
+      const precomputed = Object.entries(scriptResults)
+        .map(([stepId, result]) => {
+          const step = (workflow as any).chain?.find((s: any) => s.id === stepId);
+          return `### ${step?.title || stepId} (выполнено автоматически)\n${result.slice(0, 2000)}${result.length > 2000 ? "\n...(truncated)" : ""}`;
+        })
+        .join("\n\n");
+      replayPrompt += `\n\nПредвычисленные результаты (выполнены скриптами, НЕ нужно повторять):\n${precomputed}`;
+    }
+
+    sessions.updateSession(session.id, { lastPrompt: replayPrompt });
     emit({
       type: "stream.user_prompt",
       payload: { sessionId: session.id, prompt: replayPrompt }
-    });
-    emit({
-      type: "session.status",
-      payload: { sessionId: session.id, status: "running", title: session.title, cwd: session.cwd }
     });
 
     let replayLogged = false;
@@ -1780,10 +1911,7 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
         });
       });
 
-    sessionManager.emitToWindow(windowId, {
-      type: "miniworkflow.replay.started",
-      payload: { workflowId: workflow.id, sessionId: session.id }
-    });
+    // NOTE: miniworkflow.replay.started already emitted earlier (before scripts)
     return;
   }
 }

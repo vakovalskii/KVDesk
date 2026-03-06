@@ -2,18 +2,14 @@ import { afterEach, describe, expect, it } from "vitest";
 import { promises as fs } from "fs";
 import { join } from "path";
 import { tmpdir } from "os";
-import type { MiniWorkflow } from "../src/agent/libs/mini-workflow.ts";
+import type { MiniWorkflow } from "../src/shared/mini-workflow-types.ts";
 import {
   MiniWorkflowStore,
   buildReplayPrompt,
   checkDistillability,
-  distillSessionToWorkflow,
-  extractToolTrace,
-  filterFailedRetries,
   generateSkillMarkdown,
   redactSecrets,
-  resolveTemplate,
-  runMiniWorkflowTests,
+  renderTemplate,
   saveNewVersion,
   validateWorkflow,
   writeReplayLog
@@ -45,29 +41,29 @@ function baseWorkflow(id = "report-gen"): MiniWorkflow {
     definition_of_done: "File exists",
     constraints: [],
     inputs: [],
-    steps: [
+    chain: [
       {
         id: "step_1",
-        kind: "tool",
-        title: "Search",
-        description: "Search web",
-        outputs: [],
-        on_error: { strategy: "fail" },
-        tool_name: "search_web",
-        args_template: { query: "ai" }
-      }
-    ],
-    tests: [
+        title: "Search the web",
+        prompt_template: "Search for {{inputs.topic}} and summarize findings.",
+        tools: ["search_web"],
+        output_key: "research"
+      },
       {
-        id: "t1",
-        title: "smoke",
-        kind: "tool_smoke",
-        params: { tool_name: "search_web", test_args: {} },
-        severity: "blocking",
-        test_context: "session_cwd"
+        id: "step_2",
+        title: "Write report",
+        prompt_template: "Based on research:\n{{steps.step_1.result}}\n\nWrite a report.",
+        tools: ["write_file"],
+        output_key: "report"
       }
     ],
-    artifacts: [{ type: "text", title: "result", ref: "x" }],
+    validation: {
+      acceptance_criteria: "Report file exists and contains all sections",
+      prompt_template: "Check the report and fix if needed.",
+      tools: ["read_file", "write_file"],
+      max_fix_attempts: 3
+    },
+    artifacts: [{ type: "file", title: "report.md", description: "Generated report" }],
     safety: {
       permission_mode_on_replay: "ask",
       side_effects: [],
@@ -76,7 +72,7 @@ function baseWorkflow(id = "report-gen"): MiniWorkflow {
   };
 }
 
-describe("MiniWorkflow UT", () => {
+describe("MiniWorkflow v2 UT", () => {
   const tempDirs: string[] = [];
   afterEach(async () => {
     for (const d of tempDirs) {
@@ -85,42 +81,7 @@ describe("MiniWorkflow UT", () => {
     tempDirs.length = 0;
   });
 
-  it("UT-01: extractToolTrace returns ordered pairs", () => {
-    const messages: any[] = [
-      { type: "user_prompt", prompt: "x" },
-      { type: "tool_use", id: "u1", name: "search_web", input: { query: "a" } },
-      { type: "tool_result", tool_use_id: "u1", output: "ok", is_error: false },
-      { type: "tool_use", id: "u2", name: "write_file", input: { path: "a.md" } },
-      { type: "tool_result", tool_use_id: "u2", output: "ok", is_error: false },
-      { type: "tool_use", id: "u3", name: "edit_file", input: { path: "a.md" } },
-      { type: "tool_result", tool_use_id: "u3", output: "ok", is_error: false }
-    ];
-    const trace = extractToolTrace(messages as any);
-    expect(trace).toHaveLength(3);
-    expect(trace.map((t) => t.tool_use.id)).toEqual(["u1", "u2", "u3"]);
-  });
-
-  it("UT-02: filterFailedRetries removes failed duplicate when success exists", () => {
-    const trace = [
-      {
-        tool_use: { id: "a1", name: "search_web", input: { query: "AI" } },
-        tool_result: { tool_use_id: "a1", output: "err", is_error: true }
-      },
-      {
-        tool_use: { id: "a2", name: "search_web", input: { query: "AI" } },
-        tool_result: { tool_use_id: "a2", output: "ok", is_error: false }
-      },
-      {
-        tool_use: { id: "a3", name: "write_file", input: { path: "x.md" } },
-        tool_result: { tool_use_id: "a3", output: "ok", is_error: false }
-      }
-    ];
-    const filtered = filterFailedRetries(trace);
-    expect(filtered).toHaveLength(2);
-    expect(filtered.map((t) => t.tool_use.id)).toEqual(["a2", "a3"]);
-  });
-
-  it("UT-03: checkDistillability identifies conversation-centric session", () => {
+  it("UT-01: checkDistillability identifies conversation-centric session", () => {
     const result = checkDistillability([
       { type: "user_prompt", prompt: "hello" },
       { type: "text", text: "world" }
@@ -132,7 +93,15 @@ describe("MiniWorkflow UT", () => {
     });
   });
 
-  it("UT-04: validateWorkflow fails without goal", () => {
+  it("UT-02: checkDistillability accepts session with tool calls", () => {
+    const result = checkDistillability([
+      { type: "user_prompt", prompt: "do something" },
+      { type: "tool_use", id: "u1", name: "search_web", input: {} }
+    ] as any);
+    expect(result.suitable).toBe(true);
+  });
+
+  it("UT-03: validateWorkflow fails without goal", () => {
     const wf = baseWorkflow();
     const invalid = { ...wf } as any;
     delete invalid.goal;
@@ -141,7 +110,22 @@ describe("MiniWorkflow UT", () => {
     expect(result.errors).toContain("missing required field: goal");
   });
 
-  it("UT-05: redactSecrets replaces secret fields", () => {
+  it("UT-04: validateWorkflow fails without chain", () => {
+    const wf = baseWorkflow();
+    const invalid = { ...wf } as any;
+    delete invalid.chain;
+    const result = validateWorkflow(invalid);
+    expect(result.valid).toBe(false);
+    expect(result.errors).toContain("missing required field: chain");
+  });
+
+  it("UT-05: validateWorkflow passes for valid workflow", () => {
+    const wf = baseWorkflow();
+    const result = validateWorkflow(wf as unknown as Record<string, unknown>);
+    expect(result.valid).toBe(true);
+  });
+
+  it("UT-06: redactSecrets replaces secret fields", () => {
     const result = redactSecrets(
       { api_key: "sk-12345", query: "test" },
       new Set(["api_key"])
@@ -149,19 +133,23 @@ describe("MiniWorkflow UT", () => {
     expect(result).toEqual({ api_key: "[REDACTED]", query: "test" });
   });
 
-  it("UT-06: resolveTemplate resolves inputs placeholders", () => {
-    const args = { query: "{{inputs.topic}} {{inputs.year}}" };
-    const resolved = resolveTemplate(args, { inputs: { topic: "AI", year: "2025" } });
-    expect(resolved).toEqual({ query: "AI 2025" });
+  it("UT-07: renderTemplate resolves inputs placeholders", () => {
+    const result = renderTemplate(
+      "Search for {{inputs.topic}} in {{inputs.year}}",
+      { inputs: { topic: "AI", year: "2025" }, steps: {} }
+    );
+    expect(result).toBe("Search for AI in 2025");
   });
 
-  it("UT-07: resolveTemplate resolves step outputs placeholders", () => {
-    const args = { content: "{{steps.search.outputs.results}}" };
-    const resolved = resolveTemplate(args, { steps: { search: { results: "found 5 items" } } });
-    expect(resolved).toEqual({ content: "found 5 items" });
+  it("UT-08: renderTemplate resolves step result placeholders", () => {
+    const result = renderTemplate(
+      "Based on:\n{{steps.search.result}}",
+      { inputs: {}, steps: { search: { result: "found 5 items" } } }
+    );
+    expect(result).toBe("Based on:\nfound 5 items");
   });
 
-  it("UT-08: saveNewVersion keeps only last 5 versions", async () => {
+  it("UT-09: saveNewVersion keeps only last 5 versions", async () => {
     const baseDir = await makeTempDir();
     tempDirs.push(baseDir);
     let wf = baseWorkflow("report-gen");
@@ -178,20 +166,32 @@ describe("MiniWorkflow UT", () => {
     expect(active?.version).toBe("0.1.6");
   });
 
-  it("distill with clarification proceeds even without successful tool results", () => {
-    const result = distillSessionToWorkflow(
-      "sess-1",
-      [
-        { type: "tool_use", id: "t1", name: "search_web", input: { query: "x" } },
-        { type: "tool_result", tool_use_id: "t1", output: "error", is_error: true }
-      ] as any,
-      "/tmp",
-      "Результат был в отчете, даже если tool_result помечен ошибкой."
-    );
-    expect(result.status).toBe("success");
+  it("UT-10: buildReplayPrompt generates correct prompt", () => {
+    const wf = baseWorkflow();
+    wf.inputs = [
+      { id: "topic", title: "Topic", description: "Research topic", type: "string", required: true }
+    ];
+    const { prompt } = buildReplayPrompt(wf, { topic: "AI" });
+    expect(prompt).toContain("Report Gen");
+    expect(prompt).toContain("AI");
+    expect(prompt).toContain("Критерии готовности");
+    expect(prompt).toContain("Report file exists and contains all sections");
   });
 
-  it("store list merges project and global with project priority", async () => {
+  it("UT-11: buildReplayPrompt redacts secret inputs", () => {
+    const wf = {
+      ...baseWorkflow("secret-wf"),
+      inputs: [
+        { id: "topic", title: "Topic", description: "", type: "string" as const, required: true },
+        { id: "api_key", title: "Api key", description: "", type: "secret" as const, required: true, redaction: true }
+      ]
+    };
+    const { prompt, redactedInputs } = buildReplayPrompt(wf, { topic: "AI", api_key: "sk-real" });
+    expect(prompt).toContain("{{secret::api_key}}");
+    expect(redactedInputs).toEqual({ topic: "AI", api_key: "[REDACTED]" });
+  });
+
+  it("UT-12: store list merges project and global with project priority", async () => {
     const globalDir = await makeTempDir();
     const projectDir = await makeTempDir();
     tempDirs.push(globalDir, projectDir);
@@ -205,90 +205,7 @@ describe("MiniWorkflow UT", () => {
     expect(list[0].name).toBe("Project Wf");
   });
 
-  it("buildReplayPrompt redacts secret inputs with handles", () => {
-    const wf = {
-      ...baseWorkflow("secret-wf"),
-      inputs: [
-        { id: "topic", title: "Topic", description: "", type: "string", required: true },
-        { id: "api_key", title: "Api key", description: "", type: "secret", required: true, redaction: true }
-      ]
-    };
-    const { prompt, redactedInputs } = buildReplayPrompt(wf, { topic: "AI", api_key: "sk-real" });
-    expect(prompt).toContain("{{secret::api_key}}");
-    expect(redactedInputs).toEqual({ topic: "AI", api_key: "[REDACTED]" });
-  });
-
-  it("runMiniWorkflowTests validates file_exists in session_cwd", async () => {
-    const baseDir = await makeTempDir();
-    tempDirs.push(baseDir);
-    await fs.mkdir(join(baseDir, "src"), { recursive: true });
-    await fs.writeFile(join(baseDir, "src/index.ts"), "export {};\n", "utf8");
-    const wf = {
-      ...baseWorkflow("fs-wf"),
-      tests: [
-        { id: "t1", title: "exists", kind: "file_exists", params: { path: "src/index.ts" }, severity: "blocking", test_context: "session_cwd" as const }
-      ]
-    };
-    const res = await runMiniWorkflowTests(wf, { sessionCwd: baseDir });
-    expect(res.passed).toBe(true);
-    expect(res.results[0].passed).toBe(true);
-  });
-
-  it("runMiniWorkflowTests respects isolated context", async () => {
-    const baseDir = await makeTempDir();
-    tempDirs.push(baseDir);
-    await fs.writeFile(join(baseDir, "src-index.ts"), "x", "utf8");
-    const wf = {
-      ...baseWorkflow("iso-wf"),
-      tests: [
-        { id: "t1", title: "isolated miss", kind: "file_exists", params: { path: "src-index.ts" }, severity: "blocking", test_context: "isolated" as const }
-      ]
-    };
-    const res = await runMiniWorkflowTests(wf, { sessionCwd: baseDir });
-    expect(res.passed).toBe(false);
-  });
-
-  it("generateSkillMarkdown includes steps and constraints", async () => {
-    const wf = {
-      ...baseWorkflow("md-wf"),
-      constraints: ["no network"],
-      inputs: [{ id: "topic", title: "Topic", description: "Theme", type: "string", required: true }]
-    };
-    const md = await generateSkillMarkdown(wf);
-    expect(md).toContain("## Входные данные");
-    expect(md).toContain("## Инструкция для агента");
-    expect(md).toContain("## Ограничения");
-  });
-
-  it("writeReplayLog writes run file with step_results", async () => {
-    const baseDir = await makeTempDir();
-    tempDirs.push(baseDir);
-    const wf = baseWorkflow("replay-wf");
-    await writeReplayLog(
-      wf,
-      {
-        inputs: { topic: "AI" },
-        final_status: "success",
-        step_results: [
-          {
-            step_id: "s1",
-            status: "success",
-            outputs: { ok: true },
-            duration_ms: 12
-          }
-        ]
-      },
-      { baseDir }
-    );
-    const runsDir = join(baseDir, ".valera", "workflows", "replay-wf", "runs");
-    const entries = await fs.readdir(runsDir);
-    expect(entries.length).toBe(1);
-    const raw = await fs.readFile(join(runsDir, entries[0]), "utf8");
-    expect(raw).toContain("\"step_results\"");
-    expect(raw).toContain("\"outputs_hash\"");
-  });
-
-  it("store.delete removes both global and project scopes", async () => {
+  it("UT-13: store.delete removes both global and project scopes", async () => {
     const globalDir = await makeTempDir();
     const projectDir = await makeTempDir();
     tempDirs.push(globalDir, projectDir);
@@ -301,79 +218,41 @@ describe("MiniWorkflow UT", () => {
     expect(globalLoaded).toBeNull();
     expect(projectLoaded).toBeNull();
   });
-});
 
-describe("MiniWorkflow Integration (ST scenarios backend)", () => {
-  const tempDirs: string[] = [];
-  afterEach(async () => {
-    for (const d of tempDirs) {
-      await fs.rm(d, { recursive: true, force: true });
-    }
-    tempDirs.length = 0;
+  it("UT-14: generateSkillMarkdown includes chain steps", async () => {
+    const wf = {
+      ...baseWorkflow("md-wf"),
+      constraints: ["no network"],
+      inputs: [{ id: "topic", title: "Topic", description: "Theme", type: "string" as const, required: true }]
+    };
+    const md = await generateSkillMarkdown(wf);
+    expect(md).toContain("## Входные данные");
+    expect(md).toContain("## Цепочка шагов");
+    expect(md).toContain("Search the web");
+    expect(md).toContain("## Ограничения");
   });
 
-  it("ST-01 backend: distill tool-centric session yields valid workflow with inputs and steps", () => {
-    const messages = [
-      { type: "user_prompt", prompt: "Создай отчёт по теме AI на 2 страницы" },
-      { type: "tool_use", id: "u1", name: "search_web", input: { query: "AI trends 2025", explanation: "search" } },
-      { type: "tool_result", tool_use_id: "u1", output: "ok", is_error: false },
-      { type: "tool_use", id: "u2", name: "write_file", input: { path: "report.md", content: "..." } },
-      { type: "tool_result", tool_use_id: "u2", output: "ok", is_error: false },
-      { type: "text", text: "Готово. Файл report.md создан." }
-    ] as any;
-    const result = distillSessionToWorkflow("sess_01", messages, "/tmp");
-    expect(result.status).toBe("success");
-    if (result.status === "success") {
-      const wf = result.workflow;
-      expect(wf.name).toBeTruthy();
-      expect(wf.steps.length).toBeGreaterThanOrEqual(2);
-      expect(wf.tests.length).toBeGreaterThanOrEqual(1);
-      expect(wf.goal).toBeTruthy();
-      expect(validateWorkflow(wf as unknown as Record<string, unknown>).valid).toBe(true);
-    }
-  });
-
-  it("ST-02 backend: run tests + save creates SKILL.md and workflow.json", async () => {
+  it("UT-15: writeReplayLog writes run file", async () => {
     const baseDir = await makeTempDir();
     tempDirs.push(baseDir);
-    await fs.mkdir(join(baseDir, "src"), { recursive: true });
-    await fs.writeFile(join(baseDir, "src", "report.md"), "# Report\n", "utf8");
-    const wf = baseWorkflow("report-gen");
-    wf.tests = [
-      { id: "t1", title: "report exists", kind: "file_exists", params: { path: "src/report.md" }, severity: "blocking", test_context: "session_cwd" }
-    ];
-    const store = new MiniWorkflowStore();
-    const saved = await store.save(wf, { baseDir });
-    const testRes = await runMiniWorkflowTests(saved, { sessionCwd: baseDir });
-    expect(testRes.passed).toBe(true);
-
-    const skillPath = join(baseDir, ".valera", "skills", "report-gen", "SKILL.md");
-    const wfPath = join(baseDir, ".valera", "skills", "report-gen", "workflow.json");
-    const skillExists = await fs.access(skillPath).then(() => true).catch(() => false);
-    const wfExists = await fs.access(wfPath).then(() => true).catch(() => false);
-    expect(skillExists).toBe(true);
-    expect(wfExists).toBe(true);
-
-    const skillContent = await fs.readFile(skillPath, "utf8");
-    expect(skillContent).toContain("type: mini-workflow");
+    const wf = baseWorkflow("replay-wf");
+    await writeReplayLog(
+      wf,
+      {
+        inputs: { topic: "AI" },
+        final_status: "success",
+        step_results: [{ step_id: "s1", status: "success", duration_ms: 12 }]
+      },
+      { baseDir }
+    );
+    const runsDir = join(baseDir, ".valera", "workflows", "replay-wf", "runs");
+    const entries = await fs.readdir(runsDir);
+    expect(entries.length).toBe(1);
+    const raw = await fs.readFile(join(runsDir, entries[0]), "utf8");
+    expect(raw).toContain('"step_results"');
   });
 
-  it("ST-05 backend: conversation-centric session returns not_suitable", () => {
-    const messages = [
-      { type: "user_prompt", prompt: "Привет" },
-      { type: "text", text: "Привет! Чем помочь?" },
-      { type: "user_prompt", prompt: "Расскажи про погоду" },
-      { type: "text", text: "Не могу узнать погоду без инструментов." }
-    ] as any;
-    const result = distillSessionToWorkflow("sess_02", messages);
-    expect(result.status).toBe("not_suitable");
-    if (result.status === "not_suitable") {
-      expect(result.reason).toContain("инструмент");
-      expect(result.suggest_prompt_preset).toBe(true);
-    }
-  });
-
-  it("ST-07 backend: redactSecrets excludes secrets from payload", async () => {
+  it("UT-16: writeReplayLog redacts secrets", async () => {
     const baseDir = await makeTempDir();
     tempDirs.push(baseDir);
     const wf = baseWorkflow("secret-wf");
@@ -391,21 +270,5 @@ describe("MiniWorkflow Integration (ST scenarios backend)", () => {
     const raw = await fs.readFile(join(runsDir, entries[0]), "utf8");
     expect(raw).not.toContain("sk-real-key-12345");
     expect(raw).toContain("[REDACTED]");
-  });
-
-  it("ST-08 backend: delete removes skills and workflow dirs", async () => {
-    const baseDir = await makeTempDir();
-    tempDirs.push(baseDir);
-    const store = new MiniWorkflowStore();
-    await store.save(baseWorkflow("seo-audit"), { baseDir });
-    const skillPath = join(baseDir, ".valera", "skills", "seo-audit");
-    const wfPath = join(baseDir, ".valera", "workflows", "seo-audit");
-    expect(await fs.access(skillPath).then(() => true).catch(() => false)).toBe(true);
-
-    await store.delete("seo-audit", { baseDir });
-    const skillGone = await fs.access(skillPath).then(() => false).catch(() => true);
-    const wfGone = await fs.access(wfPath).then(() => false).catch(() => true);
-    expect(skillGone).toBe(true);
-    expect(wfGone).toBe(true);
   });
 });

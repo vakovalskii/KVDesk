@@ -249,8 +249,6 @@ export type ServerEvent =
   | { type: "miniworkflow.list"; payload: { workflows: MiniWorkflowSummary[] } }
   | { type: "miniworkflow.loaded"; payload: { workflow: MiniWorkflow } }
   | { type: "miniworkflow.distill.result"; payload: { sessionId: string; result: { status: "success"; workflow: MiniWorkflow } | { status: "needs_clarification"; questions: string[] } | { status: "not_suitable"; reason: string; suggest_prompt_preset: boolean } } }
-  | { type: "miniworkflow.tests.result"; payload: { workflowId: string; passed: boolean; results: MiniWorkflowTestResult[] } }
-  | { type: "miniworkflow.fix.result"; payload: { workflow: MiniWorkflow; attempt: number } }
   | { type: "miniworkflow.replay.started"; payload: { workflowId: string; sessionId: string } }
   | { type: "miniworkflow.error"; payload: { message: string } }
   // Scheduler events
@@ -275,6 +273,7 @@ export type ClientEvent =
   | { type: "settings.get" }
   | { type: "settings.save"; payload: { settings: ApiSettings; } }
   | { type: "open.external"; payload: { url: string; } }
+  | { type: "open.path"; payload: { path: string; } }
   | { type: "models.get" }
   | { type: "file_changes.confirm"; payload: { sessionId: string; } }
   | { type: "file_changes.rollback"; payload: { sessionId: string; } }
@@ -297,12 +296,10 @@ export type ClientEvent =
   | { type: "miniworkflow.list"; payload?: { cwd?: string } }
   | { type: "miniworkflow.get"; payload: { workflowId: string; cwd?: string } }
   | { type: "miniworkflow.distill"; payload: { sessionId: string; clarification?: string } }
-  | { type: "miniworkflow.test"; payload: { workflow: MiniWorkflow } }
-  | { type: "miniworkflow.fix"; payload: { workflow: MiniWorkflow; failedResults: MiniWorkflowTestResult[]; attempt: number } }
   | { type: "miniworkflow.archive"; payload: { workflowId: string; cwd?: string } }
   | { type: "miniworkflow.save"; payload: { workflow: MiniWorkflow; scope?: "global" | "project"; cwd?: string } }
   | { type: "miniworkflow.delete"; payload: { workflowId: string; scope?: "global" | "project" | "both"; cwd?: string } }
-  | { type: "miniworkflow.replay"; payload: { workflowId: string; inputs: Record<string, unknown>; cwd?: string } }
+  | { type: "miniworkflow.replay"; payload: { workflowId: string; inputs: Record<string, unknown>; cwd?: string; model?: string } }
   // Scheduler events
   | { type: "scheduler.default_model.get" }
   | { type: "scheduler.default_model.set"; payload: { modelId: string } }

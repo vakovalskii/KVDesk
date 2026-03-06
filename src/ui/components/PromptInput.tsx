@@ -38,11 +38,12 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
     if (activeSessionId && !trimmedPrompt) return;
 
     if (!activeSessionId) {
-      // Resolve selected model id to API model name (for scheduler default and session.start)
+      // Resolve selected model: LLM provider models keep full id (with ::), legacy models use name
       const state = useAppStore.getState();
-      const apiModelName = state.llmModels?.find(m => m.id === selectedModel)?.name
-        ?? state.availableModels?.find(m => m.id === selectedModel)?.name
-        ?? selectedModel;
+      const llmModel = state.llmModels?.find(m => m.id === selectedModel);
+      const apiModelName = llmModel
+        ? llmModel.id  // LLM provider model: send full id with :: so backend can resolve provider
+        : (state.availableModels?.find(m => m.id === selectedModel)?.name ?? selectedModel);
 
       setPendingStart(true);
       

@@ -29,7 +29,7 @@
 		"react"
 	],
 	"type": "module",
-	"main": "dist-electron/main.js",
+	"main": "dist-electron/agent/main.js",
 	"scripts": {
 		"dev:clean": "node scripts/dev-clean.cjs",
 		"dev": "node scripts/dev.cjs",
@@ -42,7 +42,7 @@
 		"start:xvfb": "xvfb-run -a electron . --no-sandbox",
 		"lint": "eslint .",
 		"preview": "vite preview",
-		"copy:electron-prompts": "node -e \"const fs=require('fs');const path=require('path');fs.mkdirSync('dist-electron/libs/prompts',{recursive:true});fs.readdirSync('src/agent/libs/prompts').filter(f=>f.endsWith('.txt')).forEach(f=>fs.copyFileSync(path.join('src/agent/libs/prompts',f),path.join('dist-electron/libs/prompts',f)))\"",
+		"copy:electron-prompts": "node -e \"const fs=require('fs');const path=require('path');fs.mkdirSync('dist-electron/agent/libs/prompts',{recursive:true});fs.readdirSync('src/agent/libs/prompts').filter(f=>f.endsWith('.txt')).forEach(f=>fs.copyFileSync(path.join('src/agent/libs/prompts',f),path.join('dist-electron/agent/libs/prompts',f)))\"",
 		"transpile:electron": "tsc --project src/agent/tsconfig.json && npm run copy:electron-prompts",
 		"transpile:sidecar": "tsc --project src/sidecar/tsconfig.json && npm run copy:sidecar-prompts",
 		"build:sidecar": "npm run copy:sidecar-prompts && node scripts/build-sidecar.cjs",

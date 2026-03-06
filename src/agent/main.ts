@@ -66,8 +66,10 @@ app.on("ready", () => {
     trafficLightPosition: { x: 15, y: 18 },
   });
 
-  if (isDev()) loadURLWithRetry(mainWindow, `http://localhost:${DEV_PORT}`);
-  else mainWindow.loadFile(getUIPath());
+  if (isDev()) {
+    loadURLWithRetry(mainWindow, `http://localhost:${DEV_PORT}`);
+    mainWindow.webContents.openDevTools({ mode: "bottom" });
+  } else mainWindow.loadFile(getUIPath());
 
   // Register window with SessionManager for event routing
   sessionManager.registerWindow(mainWindow);

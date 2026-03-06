@@ -1,11 +1,8 @@
-export type DistillResult =
-  | { status: "success"; workflow: MiniWorkflow }
-  | { status: "needs_clarification"; questions: string[] }
-  | { status: "not_suitable"; reason: string; suggest_prompt_preset: boolean };
+// ─── MiniApp v2: chain-of-prompts architecture ───
 
 export type WorkflowStatus = "draft" | "testing" | "published" | "archived";
-export type TestSeverity = "blocking" | "warning";
-export type TestContext = "session_cwd" | "isolated";
+
+// ─── Input spec (what to ask user before launch) ───
 
 export type InputSpec = {
   id: string;
@@ -18,38 +15,40 @@ export type InputSpec = {
   redaction?: boolean;
 };
 
-export type OutputSpec = {
-  name: string;
-  type: "string" | "file_path" | "json" | "number" | "boolean";
-  description: string;
-  source: "tool_result" | "llm_response" | "manual_input";
-};
+// ─── Chain step (a single focused prompt for the orchestrator) ───
 
-export type StepSpec = {
-  id: string;
-  kind: "tool" | "llm" | "manual";
-  title: string;
-  description: string;
-  outputs: OutputSpec[];
-  on_error: { strategy: "fail" | "retry" | "ask_user"; max_retries?: number };
-  tool_name?: string;
-  args_template?: Record<string, unknown>;
-};
-
-export type TestSpec = {
+export type ChainStep = {
   id: string;
   title: string;
-  kind: "file_exists" | "file_contains" | "json_schema" | "tool_smoke" | "custom_llm_judge";
-  params: Record<string, unknown>;
-  severity: TestSeverity;
-  test_context?: TestContext;
+  prompt_template: string;              // may contain {{inputs.X}} and {{steps.prev_id.result}}
+  tools: string[];                       // which tools are available for this step
+  output_key: string;                    // name used to reference this step's result
+  execution: "llm" | "script";          // how to execute: LLM agent or deterministic script
+  script?: {
+    language: "python" | "javascript";
+    code: string;                        // inline script source
+    file?: string;                       // saved script path (filled after distill)
+  };
 };
+
+// ─── Validation config ───
+
+export type ValidationConfig = {
+  acceptance_criteria: string;           // human-readable criteria for the result
+  prompt_template: string;               // prompt for the validation agent
+  tools: string[];                       // tools available during validation
+  max_fix_attempts: number;              // max retries (typically 3)
+};
+
+// ─── Artifact description ───
 
 export type ArtifactSpec = {
   type: "file" | "text" | "link" | "table";
   title: string;
-  ref: string;
+  description: string;
 };
+
+// ─── The MiniWorkflow itself ───
 
 export type MiniWorkflow = {
   id: string;
@@ -72,8 +71,8 @@ export type MiniWorkflow = {
   definition_of_done: string;
   constraints: string[];
   inputs: InputSpec[];
-  steps: StepSpec[];
-  tests: TestSpec[];
+  chain: ChainStep[];
+  validation: ValidationConfig;
   artifacts: ArtifactSpec[];
   safety: {
     permission_mode_on_replay: "ask" | "auto";
@@ -81,6 +80,15 @@ export type MiniWorkflow = {
     network_policy: "offline" | "allow_web_read" | "allow_web_write";
   };
 };
+
+// ─── Distill result ───
+
+export type DistillResult =
+  | { status: "success"; workflow: MiniWorkflow }
+  | { status: "needs_clarification"; questions: string[] }
+  | { status: "not_suitable"; reason: string; suggest_prompt_preset: boolean };
+
+// ─── Summary for list view ───
 
 export type MiniWorkflowSummary = {
   id: string;
@@ -94,11 +102,11 @@ export type MiniWorkflowSummary = {
   updated_at: string;
 };
 
+// ─── Test result (for UI display during distill) ───
+
 export type MiniWorkflowTestResult = {
   id: string;
   title: string;
-  kind: string;
-  severity: "blocking" | "warning";
   passed: boolean;
   message: string;
 };
