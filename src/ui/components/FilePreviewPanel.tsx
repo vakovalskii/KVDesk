@@ -199,7 +199,7 @@ function ImageWithZoom({ src, alt }: { src: string; alt: string }) {
             ref={imgRef}
             src={src}
             alt={alt}
-            className="block max-w-full max-h-full object-contain"
+            className="block max-w-full max-h-full object-contain select-none"
             draggable={false}
             style={{ maxHeight: 'calc(100vh - 160px)' }}
           />
