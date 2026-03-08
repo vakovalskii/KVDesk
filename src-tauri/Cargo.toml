@@ -18,6 +18,8 @@ tauri-plugin-notification = "2"
 tauri-plugin-i18n = { git = "https://github.com/razein97/tauri-plugin-i18n" }
 tauri-plugin-locale = "2"
 rusqlite = { version = "0.32", features = ["bundled"] }
+image = { version = "0.25", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "tiff"] }
+base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 regex = "1"

@@ -72,3 +72,4 @@ sessions.db-shm
 
 # Locales directory
 public/locales/
+public/locales/*

@@ -171,6 +171,7 @@ export type ApiSettings = {
   enableFetchTools?: boolean; // Enable fetch/fetch_json/download tools
   enableImageTools?: boolean; // Enable attach_image tool
   useGitForDiff?: boolean; // Use git for diff (true) or file snapshots (false)
+  useBuiltinViewer?: boolean; // Use built-in file preview panel (true) or open in OS app (false)
   llmProviders?: LLMProviderSettings; // LLM providers and models configuration
   roleGroupSettings?: RoleGroupSettings; // Default role group configuration
   requestTimeoutMs?: number; // API request timeout in ms (default: 300000 = 5 min)

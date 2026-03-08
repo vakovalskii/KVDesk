@@ -56,6 +56,7 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
   const [enableFetchTools, setEnableFetchTools] = useState(currentSettings?.enableFetchTools || false);
   const [enableImageTools, setEnableImageTools] = useState(currentSettings?.enableImageTools ?? false);
   const [useGitForDiff, setUseGitForDiff] = useState(currentSettings?.useGitForDiff ?? true);
+  const [useBuiltinViewer, setUseBuiltinViewer] = useState(currentSettings?.useBuiltinViewer ?? true);
   const [requestTimeoutMs, setRequestTimeoutMs] = useState(currentSettings?.requestTimeoutMs?.toString() || "300000");
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [showTavilyPassword, setShowTavilyPassword] = useState(false);
@@ -143,6 +144,7 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
       setEnableFetchTools(currentSettings.enableFetchTools || false);
       setEnableImageTools(currentSettings.enableImageTools ?? false);
       setUseGitForDiff(currentSettings.useGitForDiff ?? true);
+      setUseBuiltinViewer(currentSettings.useBuiltinViewer ?? true);
     }
     setRoleGroupSettings(getRoleGroupSettings(currentSettings));
     
@@ -309,6 +311,7 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
       enableFetchTools,
       enableImageTools,
       useGitForDiff,
+      useBuiltinViewer,
       requestTimeoutMs: parseInt(requestTimeoutMs) || 300000,
       llmProviders: llmProviderSettings,
       roleGroupSettings,
@@ -514,6 +517,8 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
                 setEnableImageTools={setEnableImageTools}
                 useGitForDiff={useGitForDiff}
                 setUseGitForDiff={setUseGitForDiff}
+                useBuiltinViewer={useBuiltinViewer}
+                setUseBuiltinViewer={setUseBuiltinViewer}
               />
             ) : activeTab === 'skills' ? (
               <div className="p-6">
@@ -1599,7 +1604,9 @@ function ToolsTab({
   enableImageTools,
   setEnableImageTools,
   useGitForDiff,
-  setUseGitForDiff
+  setUseGitForDiff,
+  useBuiltinViewer,
+  setUseBuiltinViewer
 }: any) {
   const { t } = useI18n();
   return (
@@ -1715,7 +1722,7 @@ function ToolsTab({
             <div className="flex-1">
               <span className="block text-sm font-medium text-ink-700">{t('settings.useGitForDiff')}</span>
               <p className="mt-0.5 text-xs text-ink-500">
-                {useGitForDiff 
+                {useGitForDiff
                   ? t('settings.gitForDiffOn')
                   : t('settings.gitForDiffOff')}
               </p>
@@ -1725,6 +1732,33 @@ function ToolsTab({
                 type="checkbox"
                 checked={useGitForDiff}
                 onChange={(e) => setUseGitForDiff(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-ink-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-accent/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-ink-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-accent"></div>
+            </div>
+          </label>
+        </div>
+
+        {/* File Viewer */}
+        <div className="border-t border-ink-900/10 pt-4 mt-4">
+          <label className="block text-sm font-medium text-ink-700 mb-3">
+            {t('settings.fileViewer')}
+            <span className="ml-2 text-xs font-normal text-ink-500">{t('settings.fileViewerDesc')}</span>
+          </label>
+          <label className="flex items-center justify-between cursor-pointer">
+            <div className="flex-1">
+              <span className="block text-sm font-medium text-ink-700">{t('settings.useBuiltinViewer')}</span>
+              <p className="mt-0.5 text-xs text-ink-500">
+                {useBuiltinViewer
+                  ? t('settings.builtinViewerOn')
+                  : t('settings.builtinViewerOff')}
+              </p>
+            </div>
+            <div className="relative">
+              <input
+                type="checkbox"
+                checked={useBuiltinViewer}
+                onChange={(e) => setUseBuiltinViewer(e.target.checked)}
                 className="sr-only peer"
               />
               <div className="w-11 h-6 bg-ink-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-accent/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-ink-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-accent"></div>

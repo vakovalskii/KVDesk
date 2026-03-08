@@ -7,15 +7,28 @@ mod scheduler;
 
 use db::{Database, CreateSessionParams, UpdateSessionParams, Session, SessionHistory, TodoItem, FileChange, LLMProvider, LLMModel, LLMProviderSettings, ApiSettings, ScheduledTask, CreateScheduledTaskParams, UpdateScheduledTaskParams};
 use scheduler::SchedulerService;
+use base64::Engine as _;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
-use std::io::{BufRead, BufReader, Write};
+use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::sync::{Arc, Mutex};
+use std::collections::HashMap;
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
+
+// --- Thumbnail cache ((path, size) → (mtime_secs, dataUrl)) ---
+struct ThumbCache {
+  map: HashMap<(String, u32), (u64, String)>,
+}
+
+static THUMB_CACHE: OnceLock<Mutex<ThumbCache>> = OnceLock::new();
+
+fn thumb_cache() -> &'static Mutex<ThumbCache> {
+  THUMB_CACHE.get_or_init(|| Mutex::new(ThumbCache { map: HashMap::new() }))
+}
 
 #[derive(Serialize)]
 #[serde(rename_all = "camelCase")]
@@ -429,8 +442,11 @@ fn open_target(target: &str) -> Result<(), String> {
 
   #[cfg(target_os = "windows")]
   {
+    use std::os::windows::process::CommandExt;
+    const CREATE_NO_WINDOW: u32 = 0x08000000;
     let status = Command::new("cmd")
       .args(["/C", "start", "", target])
+      .creation_flags(CREATE_NO_WINDOW)
       .status()
       .map_err(|error| format!("[shell] Failed to spawn cmd to open target: {error}"))?;
     if !status.success() {
@@ -813,6 +829,72 @@ fn list_directory(path: String) -> Result<Vec<FileItem>, String> {
   }
 
   Ok(out)
+}
+
+#[tauri::command]
+fn get_thumbnail(path: String, size: Option<u32>) -> Result<Option<String>, String> {
+  let thumb_size = size.unwrap_or(128);
+
+  // Get file mtime for cache invalidation
+  let mtime = fs::metadata(&path)
+    .and_then(|m| m.modified())
+    .map(|t| t.duration_since(std::time::UNIX_EPOCH).unwrap_or_default().as_secs())
+    .unwrap_or(0);
+
+  let cache_key = (path.clone(), thumb_size);
+
+  // Check cache
+  {
+    let cache = thumb_cache().lock().unwrap();
+    if let Some((cached_mtime, data_url)) = cache.map.get(&cache_key) {
+      if *cached_mtime == mtime {
+        return Ok(Some(data_url.clone()));
+      }
+    }
+  }
+
+  let img = image::open(&path).map_err(|e| format!("[get_thumbnail] Cannot open image: {e}"))?;
+  let thumb = img.thumbnail(thumb_size, thumb_size);
+
+  // Encode as JPEG for larger sizes (much smaller), PNG for small thumbnails
+  let mut buf: Vec<u8> = Vec::new();
+  if thumb_size > 256 {
+    thumb
+      .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Jpeg)
+      .map_err(|e| format!("[get_thumbnail] Encode failed: {e}"))?;
+    let encoded = base64::engine::general_purpose::STANDARD.encode(&buf);
+    let data_url = format!("data:image/jpeg;base64,{encoded}");
+
+    let mut cache = thumb_cache().lock().unwrap();
+    cache.map.insert(cache_key, (mtime, data_url.clone()));
+    return Ok(Some(data_url));
+  }
+
+  thumb
+    .write_to(&mut std::io::Cursor::new(&mut buf), image::ImageFormat::Png)
+    .map_err(|e| format!("[get_thumbnail] Encode failed: {e}"))?;
+
+  let encoded = base64::engine::general_purpose::STANDARD.encode(&buf);
+  let data_url = format!("data:image/png;base64,{encoded}");
+
+  // Store in cache
+  {
+    let mut cache = thumb_cache().lock().unwrap();
+    cache.map.insert(cache_key, (mtime, data_url.clone()));
+  }
+
+  Ok(Some(data_url))
+}
+
+#[tauri::command]
+fn get_file_text_preview(path: String, max_bytes: Option<usize>) -> Result<Option<String>, String> {
+  let limit = max_bytes.unwrap_or(4096);
+  let mut file = fs::File::open(&path).map_err(|e| format!("[get_file_text_preview] Cannot open: {e}"))?;
+  let mut buf = vec![0u8; limit];
+  let n = file.read(&mut buf).map_err(|e| format!("[get_file_text_preview] Read failed: {e}"))?;
+  buf.truncate(n);
+  // Convert to UTF-8 lossy so binary files don't crash
+  Ok(Some(String::from_utf8_lossy(&buf).into_owned()))
 }
 
 #[tauri::command]
@@ -2143,6 +2225,8 @@ fn main() {
     .invoke_handler(tauri::generate_handler![
       client_event,
       list_directory,
+      get_thumbnail,
+      get_file_text_preview,
       read_memory,
       write_memory,
       get_file_old_content,

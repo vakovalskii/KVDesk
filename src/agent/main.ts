@@ -229,6 +229,58 @@ app.on("ready", () => {
     }
   });
 
+  // Handle thumbnail generation for image files
+  const thumbnailCache = new Map<string, { dataUrl: string; mtime: number }>();
+  ipcMainHandle("get-thumbnail", async (_, filePath: string, size: number = 128) => {
+    try {
+      const stats = await fs.stat(filePath);
+      const mtime = stats.mtimeMs;
+      const cacheKey = `${filePath}:${size}`;
+      const cached = thumbnailCache.get(cacheKey);
+      if (cached && cached.mtime === mtime) {
+        return cached.dataUrl;
+      }
+
+      const sharpModule = await import("sharp");
+      const sharp = (sharpModule as any).default ?? sharpModule;
+      const buf = await sharp(filePath, { failOnError: false })
+        .resize(size, size, { fit: "inside", withoutEnlargement: true })
+        .webp({ quality: 80 })
+        .toBuffer();
+      const dataUrl = `data:image/webp;base64,${buf.toString("base64")}`;
+
+      // Keep cache bounded (~200 entries)
+      if (thumbnailCache.size >= 200) {
+        const firstKey = thumbnailCache.keys().next().value;
+        if (firstKey !== undefined) thumbnailCache.delete(firstKey);
+      }
+      thumbnailCache.set(cacheKey, { dataUrl, mtime });
+      return dataUrl;
+    } catch (error: any) {
+      console.error("[Thumbnail] Failed:", error.message);
+      return null;
+    }
+  });
+
+  // Handle text preview for text-based files
+  ipcMainHandle("get-file-text-preview", async (_, filePath: string, maxBytes: number = 4096) => {
+    try {
+      const stats = await fs.stat(filePath);
+      if (stats.size === 0) return "";
+      const fd = await fs.open(filePath, "r");
+      try {
+        const buf = Buffer.alloc(Math.min(maxBytes, stats.size));
+        await fd.read(buf, 0, buf.length, 0);
+        return buf.toString("utf-8");
+      } finally {
+        await fd.close();
+      }
+    } catch (error: any) {
+      console.error("[TextPreview] Failed:", error.message);
+      return null;
+    }
+  });
+
   // Handle session title generation
   ipcMainHandle(
     "generate-session-title",
