@@ -1,12 +1,37 @@
 import { createHash, randomUUID } from "crypto";
+import { readFileSync } from "fs";
 import { promises as fs } from "fs";
 import { homedir } from "os";
-import { join } from "path";
+import { join, dirname } from "path";
+import { fileURLToPath } from "url";
 import type { StreamMessage } from "../types.js";
 import type { DistillResult, MiniWorkflow, MiniWorkflowSummary, ChainStep, ValidationConfig } from "../../shared/mini-workflow-types.js";
 export type { DistillResult, MiniWorkflow, MiniWorkflowSummary } from "../../shared/mini-workflow-types.js";
 export { detectPermissions } from "../../shared/mini-workflow-types.js";
 export type { DetectedPermissions } from "../../shared/mini-workflow-types.js";
+
+// ─── MiniWorkflow schema reference for LLM context ───
+
+let _schemaCache: string | null = null;
+
+export function getMiniWorkflowSchemaPrompt(): string {
+  if (_schemaCache) return _schemaCache;
+  try {
+    // Resolve relative to this file's directory → prompts/miniworkflow-schema.md
+    let dir: string;
+    if ((process as any).pkg) {
+      dir = dirname(process.execPath);
+    } else if (typeof import.meta.url !== "undefined") {
+      dir = dirname(fileURLToPath(import.meta.url));
+    } else {
+      dir = __dirname;
+    }
+    _schemaCache = readFileSync(join(dir, "prompts", "miniworkflow-schema.md"), "utf8");
+  } catch {
+    _schemaCache = "";
+  }
+  return _schemaCache;
+}
 
 // ─── Utility helpers ───
 
@@ -101,6 +126,42 @@ export function buildConciseHistory(messages: StreamMessage[], limit = 120): any
   return (messages as Array<any>)
     .filter((m) => ["user_prompt", "tool_use", "tool_result", "text"].includes(String(m?.type)))
     .slice(-limit);
+}
+
+// ─── Format concise history as readable chat log ───
+
+const SECRET_PATTERN = /\b(sk-[a-zA-Z0-9]{20,}|ghp_[a-zA-Z0-9]{36,}|tvly-[a-zA-Z0-9]{20,}|[a-zA-Z0-9]{32,}(?=.*key|.*token|.*secret|.*password))\b/gi;
+
+function redactSecretsInText(text: string): string {
+  return text.replace(SECRET_PATTERN, "[REDACTED]");
+}
+
+export function formatChatLog(messages: any[]): string {
+  const lines: string[] = [];
+  for (const m of messages) {
+    const type = String(m?.type);
+    if (type === "user_prompt") {
+      const text = typeof m.prompt === "string" ? m.prompt : JSON.stringify(m.prompt);
+      lines.push(`[User] ${redactSecretsInText(text)}`);
+    } else if (type === "text") {
+      const text = typeof m.text === "string" ? m.text
+        : typeof m.message?.content === "string" ? m.message.content
+        : JSON.stringify(m.message?.content ?? m.text ?? "");
+      lines.push(`[Assistant] ${redactSecretsInText(text.slice(0, 2000))}`);
+    } else if (type === "tool_use") {
+      const name = m.name || m.tool_name || m.message?.name || "?";
+      const args = typeof m.input === "object" ? JSON.stringify(m.input).slice(0, 300)
+        : typeof m.message?.input === "object" ? JSON.stringify(m.message.input).slice(0, 300)
+        : "";
+      lines.push(`[Tool] ${name}(${redactSecretsInText(args)})`);
+    } else if (type === "tool_result") {
+      const output = typeof m.output === "string" ? m.output
+        : typeof m.message?.content === "string" ? m.message.content
+        : JSON.stringify(m.message?.content ?? m.output ?? "");
+      lines.push(`[Result] ${redactSecretsInText(output.slice(0, 500))}`);
+    }
+  }
+  return lines.join("\n");
 }
 
 // ─── Distill Step 1: Identify result ───
@@ -360,13 +421,21 @@ export function buildDistillStep4User(chain: any[], inputs: any[], history: any[
 
 // ─── Assemble MiniWorkflow from distill step 3 output ───
 
+export interface AssembleWorkflowOptions {
+  sessionId: string;
+  cwd?: string;
+  step4Output?: any;
+  sourceContext?: string;
+  sourceModel?: string;
+  step1Output?: any;
+}
+
 export function assembleWorkflow(
   step3Output: any,
   variablesAnalysis: any,
-  sessionId: string,
-  cwd?: string,
-  step4Output?: any
+  options: AssembleWorkflowOptions
 ): MiniWorkflow {
+  const { sessionId, cwd, step4Output, sourceContext, sourceModel, step1Output } = options;
   const now = new Date().toISOString();
   const userInputVars = (variablesAnalysis.variables || []).filter((v: any) => v.source === "user_input");
 
@@ -427,6 +496,14 @@ export function assembleWorkflow(
     updated_at: now,
     source_session_id: sessionId,
     source_session_cwd: cwd,
+    source_model: sourceModel,
+    source_context: sourceContext,
+    source_result: step1Output ? {
+      description: String(step1Output.result_description || ""),
+      type: String(step1Output.result_type || "other"),
+      artifacts: Array.isArray(step1Output.primary_artifacts) ? step1Output.primary_artifacts.map(String) : [],
+      requirements: step1Output.result_requirements ? String(step1Output.result_requirements) : undefined,
+    } : undefined,
     tags: ["distilled"],
     status: "draft",
     compatibility: {

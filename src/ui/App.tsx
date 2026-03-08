@@ -3,7 +3,6 @@ import type { PermissionResult } from "@anthropic-ai/claude-agent-sdk";
 import { useIPC } from "./hooks/useIPC";
 import { useAppStore } from "./store/useAppStore";
 import type { ServerEvent, ApiSettings, MiniWorkflow, MiniWorkflowSummary } from "./types";
-import { detectPermissions } from "./types";
 import { Sidebar } from "./components/Sidebar";
 import { StartSessionModal } from "./components/StartSessionModal";
 import { SessionEditModal } from "./components/SessionEditModal";
@@ -13,6 +12,7 @@ import { SettingsModal } from "./components/SettingsModal";
 import { FileBrowser } from "./components/FileBrowser";
 import { PromptInput, usePromptActions } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
+import DistillPanel from "./components/DistillPanel";
 import { AppFooter } from "./components/AppFooter";
 import { TodoPanel } from "./components/TodoPanel";
 import MDContent from "./render/markdown";
@@ -39,6 +39,14 @@ function App() {
   const [distillError, setDistillError] = useState<string | null>(null);
   const [distillQuestions, setDistillQuestions] = useState<string[]>([]);
   const [distillUsage, setDistillUsage] = useState<{ input_tokens: number; output_tokens: number } | null>(null);
+  const [distillProgress, setDistillProgress] = useState<{ step: number; totalSteps: number; label: string } | null>(null);
+  const [replayVerification, setReplayVerification] = useState<{ match: boolean; summary: string; discrepancies: string[]; suggestions: string[] } | null>(null);
+  const [replayArtifacts, setReplayArtifacts] = useState<{ filesCreated: string[]; stepResults: Record<string, string>; workspaceDir?: string } | null>(null);
+  const [verifyCycles, setVerifyCycles] = useState<{ used: number; max: number } | null>(null);
+  const [distillDebugLogPath, setDistillDebugLogPath] = useState<string | null>(null);
+  const [showDistillConfig, setShowDistillConfig] = useState(false);
+  const [distillConfigModel, setDistillConfigModel] = useState("");
+  const [distillConfigMaxCycles, setDistillConfigMaxCycles] = useState(3);
   const [runWorkflow, setRunWorkflow] = useState<MiniWorkflow | null>(null);
   const [runInputs, setRunInputs] = useState<Record<string, string>>({});
   const [runModel, setRunModel] = useState<string>("");
@@ -148,9 +156,16 @@ function App() {
     if (event.type === "miniworkflow.list") {
       setMiniWorkflows(event.payload.workflows);
     }
+    if (event.type === "miniworkflow.distill.progress") {
+      const { step, totalSteps, label, usage } = event.payload;
+      setDistillProgress({ step, totalSteps, label });
+      if (usage) setDistillUsage(usage);
+    }
     if (event.type === "miniworkflow.distill.result") {
       setDistillLoading(false);
+      setDistillProgress(null);
       setDistillUsage(event.payload.usage || null);
+      if (event.payload.debugLogPath) setDistillDebugLogPath(event.payload.debugLogPath);
       const result = event.payload.result as any;
       if (result.status === "success") {
         // Sanitize workflow to ensure all fields are correct types for rendering
@@ -221,6 +236,15 @@ function App() {
         setRunInputs(defaults);
         setRunWorkflow(full);
       }
+    }
+    if (event.type === "miniworkflow.replay.verified") {
+      setReplayVerification(event.payload.verification);
+      setReplayArtifacts(event.payload.replayArtifacts || null);
+      setVerifyCycles(event.payload.verifyCycles || null);
+    }
+    if (event.type === "miniworkflow.refine.result") {
+      // Forward to DistillPanel via CustomEvent
+      window.dispatchEvent(new CustomEvent("distill-refine", { detail: event }));
     }
     if (event.type === "miniworkflow.error") {
       setGlobalError(event.payload.message);
@@ -516,13 +540,34 @@ function App() {
 
   const handleDistillWorkflow = useCallback(() => {
     if (!activeSessionId) return;
+    // Pre-set model from session
+    const sessionModel = activeSession?.model || "";
+    setDistillConfigModel(sessionModel);
+    setDistillConfigMaxCycles(3);
+    setShowDistillConfig(true);
+  }, [activeSessionId, activeSession]);
+
+  const handleDistillStart = useCallback((model: string, maxCycles: number) => {
+    if (!activeSessionId) return;
+    setShowDistillConfig(false);
     setDistillSessionId(activeSessionId);
     setDistillLoading(true);
     setDistillWorkflow(null);
     setDistillError(null);
     setDistillQuestions([]);
     setDistillUsage(null);
-    sendEvent({ type: "miniworkflow.distill", payload: { sessionId: activeSessionId } });
+    setDistillProgress(null);
+    setReplayVerification(null);
+    setVerifyCycles(null);
+    setDistillDebugLogPath(null);
+    sendEvent({
+      type: "miniworkflow.distill",
+      payload: {
+        sessionId: activeSessionId,
+        model: model || undefined,
+        maxVerifyCycles: maxCycles
+      }
+    });
   }, [activeSessionId, sendEvent]);
 
   const hasToolUseInMessages = messages.some((m: any) => m?.type === "tool_use")
@@ -932,257 +977,104 @@ function App() {
         />
       )}
 
-      {distillSessionId && (
+      {showDistillConfig && (
         <div className="fixed inset-0 z-50 bg-ink-900/40 flex items-center justify-center p-4">
-          <div className="w-full max-w-3xl rounded-xl border border-ink-900/10 bg-white p-4 shadow-xl max-h-[85vh] overflow-y-auto">
-            <div className="flex items-center justify-between mb-3">
-              <h3 className="text-sm font-semibold text-ink-800">Distill Mini-workflow</h3>
-              <button
-                className="rounded-md border border-ink-900/10 px-2 py-1 text-xs text-ink-600 hover:bg-ink-100"
-                onClick={() => {
-                  setDistillSessionId(null);
-                  setDistillWorkflow(null);
-                }}
+          <div className="w-full max-w-md rounded-xl border border-ink-900/10 bg-white shadow-xl p-6 space-y-4">
+            <h3 className="text-sm font-semibold text-ink-800">Настройки дистилляции</h3>
+            <label className="block text-xs text-ink-700">
+              Модель
+              <div className="text-[10px] text-ink-400 mb-1">Рекомендуется использовать самую мощную / размышляющую модель</div>
+              <select
+                className="mt-1 w-full rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
+                value={distillConfigModel}
+                onChange={(e) => setDistillConfigModel(e.target.value)}
               >
-                Close
+                <option value="">Модель сессии ({activeSession?.model?.split("::").pop() || "default"})</option>
+                {llmModels.filter(m => m.enabled !== false).map(m => (
+                  <option key={m.id} value={m.id}>{m.name} ({m.providerType})</option>
+                ))}
+              </select>
+            </label>
+            <label className="block text-xs text-ink-700">
+              Макс. циклов ревью-багфикс
+              <div className="text-[10px] text-ink-400 mb-1">Сколько итераций "тестовый прогон → верификация → исправление" (1-10)</div>
+              <input
+                type="number"
+                min={1}
+                max={10}
+                className="mt-1 w-full rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
+                value={distillConfigMaxCycles}
+                onChange={(e) => setDistillConfigMaxCycles(Math.max(1, Math.min(10, Number(e.target.value) || 3)))}
+              />
+            </label>
+            <div className="flex justify-end gap-2 pt-2">
+              <button
+                className="rounded-lg border border-ink-900/20 bg-ink-100 px-3 py-1.5 text-xs text-ink-700 hover:bg-ink-200"
+                onClick={() => setShowDistillConfig(false)}
+              >
+                Отмена
+              </button>
+              <button
+                className="rounded-lg bg-accent px-4 py-1.5 text-xs text-white hover:bg-accent-hover"
+                onClick={() => handleDistillStart(distillConfigModel, distillConfigMaxCycles)}
+              >
+                Начать дистилляцию
               </button>
             </div>
-            {distillUsage && (
-              <div className="mb-2 flex items-center gap-3 text-xs text-ink-500">
-                <span>Tokens: <span className="font-medium text-ink-700">{distillUsage.input_tokens.toLocaleString()}</span> in</span>
-                <span>/ <span className="font-medium text-ink-700">{distillUsage.output_tokens.toLocaleString()}</span> out</span>
-                <span>= <span className="font-medium text-ink-700">{(distillUsage.input_tokens + distillUsage.output_tokens).toLocaleString()}</span> total</span>
-              </div>
-            )}
-            {distillLoading && (
-              <div className="rounded-lg border border-ink-900/10 bg-surface p-4 text-sm text-ink-700">
-                Анализирую сессию...
-              </div>
-            )}
-            {!distillLoading && distillError && (
-              <div className="rounded-lg border border-error/20 bg-error-light p-4 text-sm text-error">
-                {distillError}
-                {distillQuestions.length > 0 && (
-                  <div className="mt-2 space-y-2">
-                    <div className="text-xs font-semibold text-error/80 mb-1">Ошибки валидации:</div>
-                    <ul className="list-disc pl-4 text-xs">
-                      {distillQuestions.map((q) => <li key={q}>{q}</li>)}
-                    </ul>
-                    <div className="flex justify-end">
-                      <button
-                        className="rounded-lg px-3 py-1.5 text-xs text-white bg-accent hover:bg-accent-hover"
-                        onClick={() => {
-                          if (!activeSessionId) return;
-                          setDistillLoading(true);
-                          setDistillError(null);
-                          sendEvent({
-                            type: "miniworkflow.distill",
-                            payload: {
-                              sessionId: activeSessionId,
-                              validationErrors: distillQuestions
-                            }
-                          });
-                        }}
-                      >
-                        Повторить дистилляцию
-                      </button>
-                    </div>
-                  </div>
-                )}
-              </div>
-            )}
-            {!distillLoading && distillWorkflow && (
-              <div className="space-y-3">
-                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
-                  <label className="text-xs text-ink-700">
-                    Name
-                    <input
-                      className="mt-1 w-full rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
-                      value={distillWorkflow.name}
-                      onChange={(e) => setDistillWorkflow({ ...distillWorkflow, name: e.target.value })}
-                    />
-                  </label>
-                  <label className="text-xs text-ink-700">
-                    Description
-                    <input
-                      className="mt-1 w-full rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
-                      value={distillWorkflow.description}
-                      onChange={(e) => setDistillWorkflow({ ...distillWorkflow, description: e.target.value })}
-                    />
-                  </label>
-                </div>
-                <label className="block text-xs text-ink-700">
-                  Goal
-                  <textarea
-                    className="mt-1 w-full rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
-                    rows={3}
-                    value={distillWorkflow.goal}
-                    onChange={(e) => setDistillWorkflow({ ...distillWorkflow, goal: e.target.value })}
-                  />
-                </label>
-                <div className="rounded-lg border border-ink-900/10 p-3">
-                  <div className="text-xs font-semibold text-ink-700 mb-2">Inputs ({distillWorkflow.inputs.length})</div>
-                  {distillWorkflow.inputs.length === 0 ? (
-                    <div className="text-xs text-muted">Inputs не найдены автоматически.</div>
-                  ) : (
-                    <div className="space-y-2">
-                      {distillWorkflow.inputs.map((input, index) => (
-                        <div key={input.id} className="grid grid-cols-12 gap-2 items-center">
-                          <input
-                            className="col-span-3 rounded border border-ink-900/10 px-2 py-1 text-xs"
-                            value={input.id}
-                            onChange={(e) => {
-                              const next = [...distillWorkflow.inputs];
-                              next[index] = { ...next[index], id: e.target.value };
-                              setDistillWorkflow({ ...distillWorkflow, inputs: next });
-                            }}
-                          />
-                          <input
-                            className="col-span-4 rounded border border-ink-900/10 px-2 py-1 text-xs"
-                            value={input.title}
-                            onChange={(e) => {
-                              const next = [...distillWorkflow.inputs];
-                              next[index] = { ...next[index], title: e.target.value };
-                              setDistillWorkflow({ ...distillWorkflow, inputs: next });
-                            }}
-                          />
-                          <select
-                            className="col-span-3 rounded border border-ink-900/10 px-2 py-1 text-xs"
-                            value={input.type}
-                            onChange={(e) => {
-                              const next = [...distillWorkflow.inputs];
-                              next[index] = { ...next[index], type: e.target.value as any };
-                              setDistillWorkflow({ ...distillWorkflow, inputs: next });
-                            }}
-                          >
-                            {["string", "text", "number", "boolean", "enum", "date", "datetime", "file_path", "url", "secret"].map((t) => (
-                              <option key={t} value={t}>{t}</option>
-                            ))}
-                          </select>
-                          <label className="col-span-2 flex items-center gap-1 text-[11px] text-ink-600">
-                            <input
-                              type="checkbox"
-                              checked={Boolean(input.required)}
-                              onChange={(e) => {
-                                const next = [...distillWorkflow.inputs];
-                                next[index] = { ...next[index], required: e.target.checked };
-                                setDistillWorkflow({ ...distillWorkflow, inputs: next });
-                              }}
-                            />
-                            req
-                          </label>
-                        </div>
-                      ))}
-                    </div>
-                  )}
-                </div>
-                <div className="rounded-lg border border-ink-900/10 p-3">
-                  {(() => {
-                    const steps = distillWorkflow.chain || [];
-                    const scriptCount = steps.filter((s: any) => s.execution === "script").length;
-                    const llmCount = steps.length - scriptCount;
-                    return (
-                      <div className="text-xs font-semibold text-ink-700 mb-2">
-                        Chain ({steps.length} steps{scriptCount > 0 ? ` — ${scriptCount} script, ${llmCount} LLM` : ""})
-                      </div>
-                    );
-                  })()}
-                  <ol className="list-decimal pl-4 space-y-1">
-                    {(distillWorkflow.chain || []).map((step: any) => (
-                      <li key={step.id} className="text-xs text-ink-600">
-                        {step.execution === "script" ? (
-                          <span className="inline-flex items-center gap-1">
-                            <span className="px-1 py-0.5 rounded bg-blue-100 text-blue-700 text-[10px] font-medium">script</span>
-                            {step.title}
-                          </span>
-                        ) : (
-                          <span className="inline-flex items-center gap-1">
-                            <span className="px-1 py-0.5 rounded bg-amber-100 text-amber-700 text-[10px] font-medium">LLM</span>
-                            {step.title}
-                          </span>
-                        )}
-                        <span className="text-muted ml-1">[{(step.tools || []).join(", ") || "no tools"}]</span>
-                      </li>
-                    ))}
-                  </ol>
-                </div>
-                {distillWorkflow.validation?.acceptance_criteria && (
-                  <div className="rounded-lg border border-success/20 bg-success/5 p-3">
-                    <div className="text-xs font-semibold text-ink-700 mb-1">Acceptance Criteria</div>
-                    <div className="text-xs text-ink-600">{distillWorkflow.validation.acceptance_criteria}</div>
-                  </div>
-                )}
-                {/* Permissions detected from chain steps */}
-                {(() => {
-                  const perms = detectPermissions(distillWorkflow.chain || []);
-                  const badges: { label: string; icon: string; active: boolean; tooltip: string }[] = [
-                    { label: "Network", icon: "🌐", active: perms.network, tooltip: perms.reasons.filter(r => r.permission === "network").map(r => r.reason).join(", ") || "no network access" },
-                    { label: "File System", icon: "📁", active: perms.local_fs, tooltip: perms.reasons.filter(r => r.permission === "local_fs").map(r => r.reason).join(", ") || "no fs access" },
-                    { label: "Git", icon: "🔀", active: perms.git, tooltip: perms.reasons.filter(r => r.permission === "git").map(r => r.reason).join(", ") || "no git access" },
-                  ];
-                  return (
-                    <div className="rounded-lg border border-ink-900/10 p-3">
-                      <div className="text-xs font-semibold text-ink-700 mb-2">Permissions</div>
-                      <div className="flex flex-wrap gap-2">
-                        {badges.map(b => (
-                          <span
-                            key={b.label}
-                            title={b.tooltip}
-                            className={`inline-flex items-center gap-1 px-2 py-1 rounded-md text-[11px] font-medium border ${
-                              b.active
-                                ? "border-amber-300 bg-amber-50 text-amber-800"
-                                : "border-ink-900/10 bg-surface-tertiary text-ink-400"
-                            }`}
-                          >
-                            <span>{b.icon}</span>
-                            {b.label}
-                          </span>
-                        ))}
-                      </div>
-                    </div>
-                  );
-                })()}
-                <div className="flex justify-end gap-2">
-                  <button
-                    className="rounded-lg bg-accent px-3 py-1.5 text-xs text-white hover:bg-accent-hover"
-                    onClick={() => {
-                      sendEvent({
-                        type: "miniworkflow.save",
-                        payload: {
-                          workflow: { ...distillWorkflow, status: "published" },
-                          scope: activeSession?.cwd ? "project" : "global",
-                          cwd: activeSession?.cwd
-                        }
-                      });
-                      setDistillSessionId(null);
-                      setDistillWorkflow(null);
-                    }}
-                  >
-                    Publish
-                  </button>
-                  <button
-                    className="rounded-lg border border-ink-900/20 bg-ink-100 px-3 py-1.5 text-xs text-ink-700 hover:bg-ink-200"
-                    onClick={() => {
-                      sendEvent({
-                        type: "miniworkflow.save",
-                        payload: {
-                          workflow: { ...distillWorkflow, status: "draft" },
-                          scope: activeSession?.cwd ? "project" : "global",
-                          cwd: activeSession?.cwd
-                        }
-                      });
-                      setDistillSessionId(null);
-                      setDistillWorkflow(null);
-                    }}
-                  >
-                    Save as draft
-                  </button>
-                </div>
-
-              </div>
-            )}
           </div>
         </div>
+      )}
+
+      {distillSessionId && (
+        <DistillPanel
+          distillLoading={distillLoading}
+          distillWorkflow={distillWorkflow}
+          distillError={distillError}
+          distillQuestions={distillQuestions}
+          distillUsage={distillUsage}
+          distillProgress={distillProgress}
+          activeSessionId={distillSessionId}
+          activeSessionCwd={activeSession?.cwd}
+          onClose={() => {
+            setDistillSessionId(null);
+            setDistillWorkflow(null);
+            setReplayVerification(null);
+            setReplayArtifacts(null);
+            setVerifyCycles(null);
+            setDistillDebugLogPath(null);
+          }}
+          onSave={(wf, status) => {
+            sendEvent({
+              type: "miniworkflow.save",
+              payload: {
+                workflow: { ...wf, status },
+                scope: activeSession?.cwd ? "project" : "global",
+                cwd: activeSession?.cwd
+              }
+            });
+            setDistillSessionId(null);
+            setDistillWorkflow(null);
+            setReplayVerification(null);
+            setReplayArtifacts(null);
+            setVerifyCycles(null);
+            setDistillDebugLogPath(null);
+          }}
+          onRetry={(errors) => {
+            if (!activeSessionId) return;
+            setDistillLoading(true);
+            setDistillError(null);
+            sendEvent({
+              type: "miniworkflow.distill",
+              payload: { sessionId: activeSessionId, validationErrors: errors }
+            });
+          }}
+          onSetWorkflow={setDistillWorkflow}
+          sendEvent={sendEvent}
+          replayVerification={replayVerification}
+          replayArtifacts={replayArtifacts}
+          verifyCycles={verifyCycles}
+          debugLogPath={distillDebugLogPath}
+        />
       )}
 
       {runWorkflow && (

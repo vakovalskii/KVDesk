@@ -181,10 +181,13 @@ export type ServerEvent =
   // Mini workflow events
   | { type: "miniworkflow.list"; payload: { workflows: MiniWorkflowSummary[] } }
   | { type: "miniworkflow.loaded"; payload: { workflow: MiniWorkflow } }
-  | { type: "miniworkflow.distill.result"; payload: { sessionId: string; usage?: { input_tokens: number; output_tokens: number }; result: { status: "success"; workflow: MiniWorkflow } | { status: "needs_clarification"; questions: string[] } | { status: "not_suitable"; reason: string; suggest_prompt_preset: boolean } } }
+  | { type: "miniworkflow.distill.progress"; payload: { sessionId: string; step: number; totalSteps: number; label: string; usage?: { input_tokens: number; output_tokens: number } } }
+  | { type: "miniworkflow.distill.result"; payload: { sessionId: string; usage?: { input_tokens: number; output_tokens: number }; debugLogPath?: string; result: { status: "success"; workflow: MiniWorkflow } | { status: "needs_clarification"; questions: string[] } | { status: "not_suitable"; reason: string; suggest_prompt_preset: boolean } } }
   | { type: "miniworkflow.tests.result"; payload: { workflowId: string; passed: boolean; results: MiniWorkflowTestResult[] } }
   | { type: "miniworkflow.fix.result"; payload: { workflow: MiniWorkflow; attempt: number } }
   | { type: "miniworkflow.replay.started"; payload: { workflowId: string; sessionId: string } }
+  | { type: "miniworkflow.replay.verified"; payload: { workflowId: string; sessionId: string; verification: { match: boolean; summary: string; discrepancies: string[]; suggestions: string[] }; verifyCycles?: { used: number; max: number }; replayArtifacts?: { filesCreated: string[]; stepResults: Record<string, string>; workspaceDir?: string } } }
+  | { type: "miniworkflow.refine.result"; payload: { sessionId: string; result: { status: "success"; message: string; workflow: MiniWorkflow } | { status: "error"; message: string } } }
   | { type: "miniworkflow.error"; payload: { message: string } }
   // Scheduler IPC (sidecar -> Rust)
   | { type: "scheduler.request"; payload: { requestId: string; operation: string; params: Record<string, any> } };
@@ -272,7 +275,7 @@ export type ClientEvent =
   | { type: "settings.get" }
   | { type: "settings.save"; payload: { settings: ApiSettings } }
   | { type: "open.external"; payload: { url: string } }
-  | { type: "open.path"; payload: { path: string } }
+  | { type: "open.path"; payload: { path: string; cwd?: string } }
   | { type: "models.get" }
   | { type: "task.create"; payload: CreateTaskPayload }
   | { type: "task.start"; payload: { taskId: string } }
@@ -293,8 +296,11 @@ export type ClientEvent =
   // Mini workflow events
   | { type: "miniworkflow.list"; payload?: { cwd?: string } }
   | { type: "miniworkflow.get"; payload: { workflowId: string; cwd?: string } }
-  | { type: "miniworkflow.distill"; payload: { sessionId: string; validationErrors?: string[] } }
+  | { type: "miniworkflow.distill"; payload: { sessionId: string; validationErrors?: string[]; model?: string; maxVerifyCycles?: number } }
   | { type: "miniworkflow.archive"; payload: { workflowId: string; cwd?: string } }
   | { type: "miniworkflow.save"; payload: { workflow: MiniWorkflow; scope?: "global" | "project"; cwd?: string } }
   | { type: "miniworkflow.delete"; payload: { workflowId: string; scope?: "global" | "project" | "both"; cwd?: string } }
-  | { type: "miniworkflow.replay"; payload: { workflowId: string; inputs: Record<string, unknown>; cwd?: string; model?: string } };
+  | { type: "miniworkflow.replay"; payload: { workflowId: string; inputs: Record<string, unknown>; cwd?: string; model?: string } }
+  | { type: "miniworkflow.refine"; payload: { sessionId: string; workflow: MiniWorkflow; userMessage: string } }
+  | { type: "miniworkflow.verify"; payload: { sessionId: string; workflow: MiniWorkflow } }
+  | { type: "miniworkflow.fix-discrepancies"; payload: { sessionId: string; workflow: MiniWorkflow; discrepancies: string[]; suggestions: string[] } };

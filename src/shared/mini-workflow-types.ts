@@ -60,6 +60,14 @@ export type MiniWorkflow = {
   updated_at: string;
   source_session_id: string;
   source_session_cwd?: string;
+  source_model?: string;             // model used for distillation (providerId::modelId or plain modelId)
+  source_context?: string;           // concise chat log from the distilled session (reference for editing)
+  source_result?: {                  // result identified by distillation step 1
+    description: string;             // what was produced
+    type: string;                    // "file" | "text" | "table" | "code" | "other"
+    artifacts: string[];             // file paths / artifact names
+    requirements?: string;           // user's requirements for the result
+  };
   tags: string[];
   status: WorkflowStatus;
   compatibility: {

@@ -138,7 +138,9 @@ app.on("ready", () => {
       console.error("[Main] Unable to determine window ID for client event");
       return;
     }
-    handleClientEvent(data, windowId);
+    handleClientEvent(data, windowId).catch(err => {
+      console.error("[Main] handleClientEvent error:", event.type || data?.type, err);
+    });
   });
 
   // Handle open directory in Finder/Explorer
