@@ -291,6 +291,7 @@
   "filePreview.noPreview": "No preview available",
   "filePreview.openExternal": "Open",
   "filePreview.close": "Close preview",
+  "filePreview.zoom": "Zoom",
   "eventCard.sessionResult": "Session Result",
   "eventCard.duration": "Duration",
   "eventCard.durationMin": "{value} min",

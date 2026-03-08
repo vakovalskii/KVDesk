@@ -291,6 +291,7 @@
   "filePreview.noPreview": "Превью недоступно",
   "filePreview.openExternal": "Открыть",
   "filePreview.close": "Закрыть превью",
+  "filePreview.zoom": "Лупа",
   "eventCard.sessionResult": "Результат сессии",
   "eventCard.duration": "Длительность",
   "eventCard.durationMin": "{value} мин",

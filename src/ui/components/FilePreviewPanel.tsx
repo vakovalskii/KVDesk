@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, useRef, useCallback } from 'react';
 import { getPlatform } from '../platform';
 import { useI18n } from '../i18n';
 
@@ -63,7 +63,7 @@ export function FilePreviewPanel({ file, onClose }: Props) {
     (async () => {
       try {
         if (kind === 'image') {
-          const dataUrl = await getPlatform().invoke<string | null>('get-thumbnail', file.path, 512);
+          const dataUrl = await getPlatform().invoke<string | null>('get-thumbnail', file.path, 1920);
           setImageDataUrl(dataUrl);
         } else if (kind === 'text') {
           const text = await getPlatform().invoke<string | null>('get-file-text-preview', file.path, 6000);
@@ -78,7 +78,7 @@ export function FilePreviewPanel({ file, onClose }: Props) {
   }, [file.path, kind]);
 
   return (
-    <div className="fixed right-80 top-0 h-full w-96 bg-surface border-l border-ink-900/10 shadow-2xl flex flex-col z-40">
+    <div className="fixed left-[280px] right-80 top-0 h-full bg-surface border-l border-ink-900/10 shadow-2xl flex flex-col z-40">
       {/* Header */}
       <div className="flex items-center justify-between h-12 px-4 border-b border-ink-900/10 bg-surface-cream flex-shrink-0">
         <div className="flex items-center gap-2 min-w-0">
@@ -111,7 +111,7 @@ export function FilePreviewPanel({ file, onClose }: Props) {
       </div>
 
       {/* Content */}
-      <div className="flex-1 overflow-auto">
+      <div className={`flex-1 min-h-0 ${kind === 'image' ? '' : 'overflow-auto'}`}>
         {loading && (
           <div className="flex items-center justify-center h-32">
             <div className="text-sm text-muted">{t('filePreview.loading')}</div>
@@ -125,13 +125,7 @@ export function FilePreviewPanel({ file, onClose }: Props) {
         )}
 
         {!loading && !error && kind === 'image' && imageDataUrl && (
-          <div className="flex items-center justify-center p-4 min-h-48">
-            <img
-              src={imageDataUrl}
-              alt={file.name}
-              className="max-w-full max-h-full object-contain rounded shadow"
-            />
-          </div>
+          <ImageWithZoom src={imageDataUrl} alt={file.name} />
         )}
 
         {!loading && !error && kind === 'image' && !imageDataUrl && (
@@ -154,6 +148,96 @@ export function FilePreviewPanel({ file, onClose }: Props) {
             </svg>
             <span className="text-sm">{t('filePreview.noPreview')}</span>
           </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+function ImageWithZoom({ src, alt }: { src: string; alt: string }) {
+  const imgRef = useRef<HTMLImageElement>(null);
+  const [zoomEnabled, setZoomEnabled] = useState(false);
+  const [hovering, setHovering] = useState(false);
+  const [zoom, setZoom] = useState(3);
+  const [cursor, setCursor] = useState({ x: 0, y: 0 });
+  const { t } = useI18n();
+
+  const handleMouseMove = useCallback((e: React.MouseEvent<HTMLDivElement>) => {
+    const img = imgRef.current;
+    if (!img) return;
+    const rect = img.getBoundingClientRect();
+    setCursor({
+      x: e.clientX - rect.left,
+      y: e.clientY - rect.top,
+    });
+  }, []);
+
+  const handleWheel = useCallback((e: React.WheelEvent) => {
+    if (!zoomEnabled) return;
+    e.preventDefault();
+    setZoom(z => Math.min(10, Math.max(1, z + (e.deltaY < 0 ? 0.5 : -0.5))));
+  }, [zoomEnabled]);
+
+  const showLens = zoomEnabled && hovering;
+  const lensSize = 180;
+  const imgW = imgRef.current?.offsetWidth ?? 0;
+  const imgH = imgRef.current?.offsetHeight ?? 0;
+
+  return (
+    <div className="flex flex-col h-full">
+      {/* Image area: fills available space, centers the image */}
+      <div
+        className="flex-1 min-h-0 flex items-center justify-center p-4 overflow-hidden"
+        onMouseEnter={() => setHovering(true)}
+        onMouseLeave={() => setHovering(false)}
+        onMouseMove={handleMouseMove}
+        onWheel={handleWheel}
+        style={{ cursor: zoomEnabled ? 'crosshair' : 'default' }}
+      >
+        <div className="relative inline-block max-w-full max-h-full">
+          <img
+            ref={imgRef}
+            src={src}
+            alt={alt}
+            className="block max-w-full max-h-full object-contain"
+            draggable={false}
+            style={{ maxHeight: 'calc(100vh - 160px)' }}
+          />
+          {showLens && imgW > 0 && (
+            <div
+              className="absolute rounded-full border-2 border-white/80 shadow-lg pointer-events-none"
+              style={{
+                width: lensSize,
+                height: lensSize,
+                left: cursor.x - lensSize / 2,
+                top: cursor.y - lensSize / 2,
+                backgroundImage: `url(${src})`,
+                backgroundRepeat: 'no-repeat',
+                backgroundSize: `${imgW * zoom}px ${imgH * zoom}px`,
+                backgroundPosition: `${-cursor.x * zoom + lensSize / 2}px ${-cursor.y * zoom + lensSize / 2}px`,
+              }}
+            />
+          )}
+        </div>
+      </div>
+      {/* Zoom toolbar */}
+      <div className="flex items-center gap-2 px-3 py-2 border-t border-ink-900/10 bg-ink-50 flex-shrink-0">
+        <button
+          onClick={() => setZoomEnabled(v => !v)}
+          className={`flex items-center gap-1.5 px-2.5 py-1 rounded text-xs font-medium transition-colors ${
+            zoomEnabled
+              ? 'bg-accent text-white'
+              : 'bg-ink-200 text-ink-600 hover:bg-ink-300'
+          }`}
+        >
+          <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2}
+              d="M21 21l-6-6m2-5a7 7 0 11-14 0 7 7 0 0114 0zM10 7v3m0 0v3m0-3h3m-3 0H7" />
+          </svg>
+          {t('filePreview.zoom') ?? 'Zoom'}
+        </button>
+        {zoomEnabled && (
+          <span className="text-xs text-ink-500">{zoom.toFixed(1)}x</span>
         )}
       </div>
     </div>

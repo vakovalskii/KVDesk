@@ -95,7 +95,7 @@ describe("FilePreviewPanel", () => {
   });
 
   describe("изображения", () => {
-    it("вызывает get-thumbnail с size=512 для изображений", async () => {
+    it("вызывает get-thumbnail с size=1920 для изображений", async () => {
       mockInvoke.mockResolvedValue("data:image/webp;base64,ABC");
 
       renderWithI18n(
@@ -106,7 +106,7 @@ describe("FilePreviewPanel", () => {
         expect(mockInvoke).toHaveBeenCalledWith(
           "get-thumbnail",
           "/project/photo.jpg",
-          512
+          1920
         );
       });
     });
@@ -172,7 +172,7 @@ describe("FilePreviewPanel", () => {
         );
 
         await waitFor(() => {
-          expect(mockInvoke).toHaveBeenCalledWith("get-thumbnail", `/project/image.${ext}`, 512);
+          expect(mockInvoke).toHaveBeenCalledWith("get-thumbnail", `/project/image.${ext}`, 1920);
         });
 
         mockInvoke.mockClear();
@@ -292,6 +292,143 @@ describe("FilePreviewPanel", () => {
     });
   });
 
+  describe("отображение изображения (размеры)", () => {
+    it("изображение имеет max-w-full / max-h-full / object-contain (не растягивается)", async () => {
+      mockInvoke.mockResolvedValue("data:image/webp;base64,ABC");
+
+      renderWithI18n(
+        <FilePreviewPanel file={makeFile("photo.jpg")} onClose={vi.fn()} />
+      );
+
+      await waitFor(() => {
+        const img = screen.getByRole("img");
+        expect(img.className).toContain("max-w-full");
+        expect(img.className).toContain("max-h-full");
+        expect(img.className).toContain("object-contain");
+      });
+    });
+
+    it("изображение не растягивается по ширине (нет class w-full на img)", async () => {
+      mockInvoke.mockResolvedValue("data:image/webp;base64,ABC");
+
+      renderWithI18n(
+        <FilePreviewPanel file={makeFile("small.png")} onClose={vi.fn()} />
+      );
+
+      await waitFor(() => {
+        const img = screen.getByRole("img");
+        // w-full заставляет img растягиваться — его НЕ должно быть
+        const classes = img.className.split(/\s+/);
+        expect(classes).not.toContain("w-full");
+      });
+    });
+  });
+
+  describe("зум (лупа)", () => {
+    it("кнопка зума отображается под изображением", async () => {
+      mockInvoke.mockResolvedValue("data:image/webp;base64,ABC");
+
+      renderWithI18n(
+        <FilePreviewPanel file={makeFile("photo.jpg")} onClose={vi.fn()} />
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Zoom")).toBeInTheDocument();
+      });
+    });
+
+    it("клик по кнопке зума переключает состояние (включить/выключить)", async () => {
+      mockInvoke.mockResolvedValue("data:image/webp;base64,ABC");
+
+      renderWithI18n(
+        <FilePreviewPanel file={makeFile("photo.jpg")} onClose={vi.fn()} />
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Zoom")).toBeInTheDocument();
+      });
+
+      const zoomBtn = screen.getByText("Zoom");
+
+      // Изначально зум выключен — индикатор уровня не виден
+      expect(screen.queryByText("3.0x")).not.toBeInTheDocument();
+
+      // Включаем зум
+      fireEvent.click(zoomBtn);
+
+      // Индикатор уровня зума должен появиться
+      expect(screen.getByText("3.0x")).toBeInTheDocument();
+
+      // Выключаем зум
+      fireEvent.click(zoomBtn);
+
+      // Индикатор уровня зума должен исчезнуть
+      expect(screen.queryByText("3.0x")).not.toBeInTheDocument();
+    });
+
+    it("индикатор уровня зума показывает начальное значение 3.0x", async () => {
+      mockInvoke.mockResolvedValue("data:image/webp;base64,ABC");
+
+      renderWithI18n(
+        <FilePreviewPanel file={makeFile("photo.jpg")} onClose={vi.fn()} />
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Zoom")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Zoom"));
+
+      expect(screen.getByText("3.0x")).toBeInTheDocument();
+    });
+
+    it("кнопка зума не отображается для текстовых файлов", async () => {
+      mockInvoke.mockResolvedValue("some text content");
+
+      renderWithI18n(
+        <FilePreviewPanel file={makeFile("readme.md")} onClose={vi.fn()} />
+      );
+
+      await waitFor(() => {
+        const pre = document.querySelector("pre");
+        expect(pre).toBeInTheDocument();
+      });
+
+      expect(screen.queryByText("Zoom")).not.toBeInTheDocument();
+    });
+
+    it("кнопка зума не отображается для неподдерживаемых файлов", async () => {
+      renderWithI18n(
+        <FilePreviewPanel file={makeFile("archive.zip")} onClose={vi.fn()} />
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("No preview available")).toBeInTheDocument();
+      });
+
+      expect(screen.queryByText("Zoom")).not.toBeInTheDocument();
+    });
+
+    it("курсор crosshair при включённом зуме", async () => {
+      mockInvoke.mockResolvedValue("data:image/webp;base64,ABC");
+
+      renderWithI18n(
+        <FilePreviewPanel file={makeFile("photo.jpg")} onClose={vi.fn()} />
+      );
+
+      await waitFor(() => {
+        expect(screen.getByText("Zoom")).toBeInTheDocument();
+      });
+
+      fireEvent.click(screen.getByText("Zoom"));
+
+      const img = screen.getByRole("img");
+      const imageArea = img.closest("[style]")?.parentElement?.closest("[style]");
+      expect(imageArea).toBeTruthy();
+      expect(imageArea!.style.cursor).toBe("crosshair");
+    });
+  });
+
   describe("смена файла", () => {
     it("перезагружает превью при смене файла", async () => {
       mockInvoke
@@ -303,7 +440,7 @@ describe("FilePreviewPanel", () => {
       );
 
       await waitFor(() => {
-        expect(mockInvoke).toHaveBeenCalledWith("get-thumbnail", "/project/first.jpg", 512);
+        expect(mockInvoke).toHaveBeenCalledWith("get-thumbnail", "/project/first.jpg", 1920);
       });
 
       rerender(
@@ -311,7 +448,7 @@ describe("FilePreviewPanel", () => {
       );
 
       await waitFor(() => {
-        expect(mockInvoke).toHaveBeenCalledWith("get-thumbnail", "/project/second.jpg", 512);
+        expect(mockInvoke).toHaveBeenCalledWith("get-thumbnail", "/project/second.jpg", 1920);
       });
 
       expect(mockInvoke).toHaveBeenCalledTimes(2);
