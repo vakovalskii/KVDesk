@@ -42,6 +42,7 @@ export type ApiSettings = {
   useGitForDiff?: boolean; // Use git for diff (true) or file snapshots (false)
   llmProviders?: LLMProviderSettings; // LLM providers and models configuration
   roleGroupSettings?: RoleGroupSettings; // Default role group configuration
+  requestTimeoutMs?: number; // API request timeout in ms (default: 300000 = 5 min)
 };
 
 export type ModelInfo = {
@@ -51,7 +52,7 @@ export type ModelInfo = {
 };
 
 // LLM Provider types
-export type LLMProviderType = 'openai' | 'openrouter' | 'zai' | 'claude-code';
+export type LLMProviderType = 'openai' | 'openrouter' | 'zai' | 'ollama' | 'claude-code';
 
 export type ZaiApiUrlPrefix = 'default' | 'coding';
 
@@ -155,6 +156,8 @@ export type ServerEvent =
   | { type: "session.list"; payload: { sessions: SessionInfo[] } }
   | { type: "session.history"; payload: { sessionId: string; threadId?: string; status: SessionStatus; messages: StreamMessage[]; inputTokens?: number; outputTokens?: number; todos?: TodoItem[]; model?: string; fileChanges?: FileChange[]; hasMore?: boolean; nextCursor?: number; page?: "initial" | "prepend" } }
   | { type: "session.deleted"; payload: { sessionId: string } }
+  | { type: "session.compacting"; payload: { sessionId: string } }
+  | { type: "session.compacted"; payload: { oldSessionId: string; newSessionId: string } }
   | { type: "thread.list"; payload: { sessionId: string; threads: ThreadInfo[] } }
   | { type: "task.created"; payload: { task: MultiThreadTask; threads: ThreadInfo[] } }
   | { type: "task.status"; payload: { taskId: string; status: 'created' | 'running' | 'completed' | 'error' } }
@@ -268,6 +271,7 @@ export type ClientEvent =
   | { type: "session.pin"; payload: { sessionId: string; isPinned: boolean } }
   | { type: "session.update-cwd"; payload: { sessionId: string; cwd: string } }
   | { type: "session.update"; payload: { sessionId: string; model?: string; temperature?: number; sendTemperature?: boolean; title?: string } }
+  | { type: "session.compact"; payload: { sessionId: string } }
   | { type: "session.list" }
   | { type: "session.history"; payload: { sessionId: string; threadId?: string; limit?: number; before?: number } }
   | { type: "permission.response"; payload: { sessionId: string; toolUseId: string; result: PermissionResult } }

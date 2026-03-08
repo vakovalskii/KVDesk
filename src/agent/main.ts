@@ -265,7 +265,7 @@ app.on("ready", () => {
   ipcMainHandle("read-memory", async () => {
     try {
       const { homedir } = await import("os");
-      const memoryPath = join(homedir(), ".valera", "memory.md");
+      const memoryPath = join(homedir(), "Library", "Application Support", "ValeDesk", "memory.md");
 
       try {
         const content = await fs.readFile(memoryPath, "utf-8");
@@ -286,7 +286,7 @@ app.on("ready", () => {
   ipcMainHandle("write-memory", async (_, content: string) => {
     try {
       const { homedir } = await import("os");
-      const memoryDir = join(homedir(), ".valera");
+      const memoryDir = join(homedir(), "Library", "Application Support", "ValeDesk");
       const memoryPath = join(memoryDir, "memory.md");
 
       // Ensure directory exists

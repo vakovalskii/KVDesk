@@ -70,3 +70,6 @@ sessions.db-shm
 
 # LocalDesk workspace data
 .localdesk/
+
+# Locales directory
+public/locales/

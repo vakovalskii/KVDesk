@@ -57,6 +57,7 @@ interface AppState {
   schedulerDefaultModel: string | null;
   schedulerDefaultTemperature: number | null;
   schedulerDefaultSendTemperature: boolean | null;
+  compactingSessionId: string | null;
 
   setPrompt: (prompt: string) => void;
   setCwd: (cwd: string) => void;
@@ -107,6 +108,7 @@ export const useAppStore = create<AppState>((set, get) => ({
   schedulerDefaultModel: null,
   schedulerDefaultTemperature: null,
   schedulerDefaultSendTemperature: null,
+  compactingSessionId: null,
 
   setPrompt: (prompt) => set({ prompt }),
   setCwd: (cwd) => set({ cwd }),
@@ -196,7 +198,9 @@ export const useAppStore = create<AppState>((set, get) => ({
         set({ sessions: nextSessions, sessionsLoaded: true });
 
         const hasSessions = event.payload.sessions.length > 0;
-        set({ showStartModal: !hasSessions });
+        if (hasSessions) {
+          set({ showStartModal: false });
+        }
 
         if (!hasSessions) {
           get().setActiveSessionId(null);
@@ -439,16 +443,16 @@ export const useAppStore = create<AppState>((set, get) => ({
               })));
             }
             
-            // Extract token usage from result messages
-            let inputTokens = existing.inputTokens;
-            let outputTokens = existing.outputTokens;
+            // Accumulate token usage from result messages (additive — runner sends per-run totals)
+            let inputTokens = existing.inputTokens ?? 0;
+            let outputTokens = existing.outputTokens ?? 0;
             if (message.type === "result" && (message as any).usage) {
               const { input_tokens, output_tokens } = (message as any).usage;
               if (input_tokens !== undefined) {
-                inputTokens = input_tokens;
+                inputTokens += input_tokens;
               }
               if (output_tokens !== undefined) {
-                outputTokens = output_tokens;
+                outputTokens += output_tokens;
               }
             }
 
@@ -465,16 +469,16 @@ export const useAppStore = create<AppState>((set, get) => ({
             };
           }
 
-          // Extract token usage from result messages
-          let inputTokens = existing.inputTokens;
-          let outputTokens = existing.outputTokens;
+          // Accumulate token usage from result messages (additive — runner sends per-run totals)
+          let inputTokens = existing.inputTokens ?? 0;
+          let outputTokens = existing.outputTokens ?? 0;
           if (message.type === "result" && message.usage) {
             const { input_tokens, output_tokens } = message.usage;
             if (input_tokens !== undefined) {
-              inputTokens = input_tokens;
+              inputTokens += input_tokens;
             }
             if (output_tokens !== undefined) {
-              outputTokens = output_tokens;
+              outputTokens += output_tokens;
             }
           }
 
@@ -713,6 +717,21 @@ export const useAppStore = create<AppState>((set, get) => ({
         const { settings } = event.payload;
         set({ apiSettings: settings });
         console.log('[AppStore] Settings loaded:', settings);
+        break;
+      }
+
+      case "session.compacting": {
+        const { sessionId } = event.payload;
+        set({ compactingSessionId: sessionId });
+        break;
+      }
+
+      case "session.compacted": {
+        const { newSessionId } = event.payload;
+        // Clear compacting state
+        set({ compactingSessionId: null });
+        // Navigate to the new (compacted) session
+        get().setActiveSessionId(newSessionId);
         break;
       }
 

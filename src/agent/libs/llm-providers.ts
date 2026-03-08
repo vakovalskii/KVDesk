@@ -79,6 +79,41 @@ async function fetchOpenRouterModels(apiKey: string): Promise<PartialModel[]> {
   }
 }
 
+
+// Fetch models from Ollama
+async function fetchOllamaModels(baseUrl: string): Promise<PartialModel[]> {
+  try {
+    const apiRoot = baseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '');
+    const url = new URL('/api/tags', apiRoot.startsWith('http') ? apiRoot : `http://${apiRoot}`);
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+    const response = await fetch(url.toString(), { signal: controller.signal });
+    clearTimeout(timeoutId);
+
+    if (!response.ok) {
+      throw new Error(`Ollama /api/tags failed: HTTP ${response.status} ${response.statusText} (${url})`);
+    }
+
+    const data = await response.json();
+    const models = (data.models || []).map((model: any) => {
+      const modelId = model.name || model.model;
+      return {
+        id: modelId,
+        name: modelId,
+        description: model.details?.family || 'Local Ollama model',
+        contextLength: model.details?.context_length || undefined,
+      };
+    });
+
+    return models;
+  } catch (error) {
+    const url = baseUrl.replace(/\/v1\/?$/, '').replace(/\/$/, '') + '/api/tags';
+    console.error('[LLM Providers] Failed to fetch Ollama models:', url, error);
+    throw error;
+  }
+}
+
 // Fetch models for Claude Code (subscription-based, no API key needed)
 async function fetchClaudeCodeModels(): Promise<PartialModel[]> {
   // Claude Code subscription provides access to Claude models via the SDK
@@ -161,6 +196,11 @@ export async function fetchModelsFromProvider(provider: LLMProvider): Promise<LL
       fetchedModels = await fetchZaiModels(provider.apiKey, provider.zaiApiPrefix || 'default');
       break;
 
+    case 'ollama':
+      console.log('Fetching Ollama models from', provider.baseUrl || 'http://localhost:11434/v1');
+      fetchedModels = await fetchOllamaModels(provider.baseUrl || 'http://localhost:11434/v1');
+      break;
+
     case 'claude-code':
       fetchedModels = await fetchClaudeCodeModels();
       break;
@@ -189,8 +229,8 @@ export async function checkModelsAvailability(provider: LLMProvider, models: LLM
   const unavailable: string[] = [];
 
   // For OpenAI-compatible APIs, we can check by making a minimal completion request
-  if (provider.type === 'openai' || provider.type === 'zai') {
-    let baseUrl = provider.baseUrl || (provider.type === 'openai' ? 'https://api.openai.com/v1' : 'https://api.z.ai/api/paas/v4');
+  if (provider.type === 'openai' || provider.type === 'zai' || provider.type === 'ollama') {
+    let baseUrl = provider.baseUrl || (provider.type === 'openai' ? 'https://api.openai.com/v1' : provider.type === 'zai' ? 'https://api.z.ai/api/paas/v4' : 'http://localhost:11434/v1');
 
     // For Z.AI, use the correct prefix
     if (provider.type === 'zai' && provider.zaiApiPrefix === 'coding') {
@@ -202,11 +242,11 @@ export async function checkModelsAvailability(provider: LLMProvider, models: LLM
         const response = await fetch(`${baseUrl}/chat/completions`, {
           method: 'POST',
           headers: {
-            'Authorization': `Bearer ${provider.apiKey}`,
+            ...(provider.type !== 'ollama' ? { 'Authorization': `Bearer ${provider.apiKey}` } : {}),
             'Content-Type': 'application/json',
           },
           body: JSON.stringify({
-            model: model.id.split('-').slice(0, -1).join('-'), // Extract original model ID
+            model: model.id.includes('::') ? model.id.split('::')[1] : model.id,
             messages: [{ role: 'user', content: 'test' }],
             max_tokens: 1,
           }),
@@ -239,14 +279,14 @@ export function validateProvider(provider: Partial<LLMProvider>): { valid: boole
     return { valid: false, error: 'Provider name is required' };
   }
 
-  // Claude Code doesn't need API key (uses subscription via CLI)
-  if (provider.type !== 'claude-code') {
+  // Claude Code and Ollama don't need API keys
+  if (provider.type !== 'claude-code' && provider.type !== 'ollama') {
     if (!provider.apiKey || provider.apiKey.trim() === '') {
       return { valid: false, error: 'API key is required' };
     }
   }
 
-  if ((provider.type === 'openai' || provider.type === 'zai') && !provider.baseUrl) {
+  if ((provider.type === 'openai' || provider.type === 'zai' || provider.type === 'ollama') && !provider.baseUrl) {
     return { valid: false, error: 'Base URL is required for this provider type' };
   }
 

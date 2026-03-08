@@ -178,6 +178,8 @@ export type ApiSettings = {
   useGitForDiff?: boolean; // Use git for diff (true) or file snapshots (false)
   llmProviders?: LLMProviderSettings; // LLM providers and models configuration
   roleGroupSettings?: RoleGroupSettings; // Default role group configuration
+  requestTimeoutMs?: number; // API request timeout in ms (default: 300000 = 5 min)
+  locale?: string; // UI language (e.g. 'en', 'ru')
 };
 
 export type ModelInfo = {
@@ -187,7 +189,7 @@ export type ModelInfo = {
 };
 
 // LLM Provider types
-export type LLMProviderType = 'openai' | 'openrouter' | 'zai' | 'claude-code';
+export type LLMProviderType = 'openai' | 'openrouter' | 'zai' | 'ollama' | 'claude-code';
 
 export type ZaiApiUrlPrefix = 'default' | 'coding';
 
@@ -256,6 +258,9 @@ export type ServerEvent =
   | { type: "miniworkflow.replay.verified"; payload: { workflowId: string; sessionId: string; verification: { match: boolean; summary: string; discrepancies: string[]; suggestions: string[] }; verifyCycles?: { used: number; max: number }; replayArtifacts?: { filesCreated: string[]; stepResults: Record<string, string>; workspaceDir?: string } } }
   | { type: "miniworkflow.refine.result"; payload: { sessionId: string; result: { status: "success"; message: string; workflow: MiniWorkflow } | { status: "error"; message: string } } }
   | { type: "miniworkflow.error"; payload: { message: string } }
+  // Compact events
+  | { type: "session.compacting"; payload: { sessionId: string } }
+  | { type: "session.compacted"; payload: { oldSessionId: string; newSessionId: string } }
   // Scheduler events
   | { type: "scheduler.notification"; payload: { title: string; body: string } }
   | { type: "scheduler.task_execute"; payload: { taskId: string; title: string; prompt?: string } }
@@ -308,6 +313,8 @@ export type ClientEvent =
   | { type: "miniworkflow.refine"; payload: { sessionId: string; workflow: MiniWorkflow; userMessage: string } }
   | { type: "miniworkflow.verify"; payload: { sessionId: string; workflow: MiniWorkflow } }
   | { type: "miniworkflow.fix-discrepancies"; payload: { sessionId: string; workflow: MiniWorkflow; discrepancies: string[]; suggestions: string[] } }
+  // Compact events
+  | { type: "session.compact"; payload: { sessionId: string } }
   // Scheduler events
   | { type: "scheduler.default_model.get" }
   | { type: "scheduler.default_model.set"; payload: { modelId: string } }

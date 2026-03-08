@@ -189,7 +189,8 @@ fn emit_server_event_app(app: &tauri::AppHandle, event: &Value) -> Result<(), St
 }
 
 fn memory_path() -> Result<PathBuf, String> {
-  Ok(home_dir()?.join(".valera").join("memory.md"))
+  // Use the same path as the agent tool: ~/Library/Application Support/ValeDesk/memory.md
+  Ok(app_data_dir()?.join("memory.md"))
 }
 
 /// Handle scheduler.request events from sidecar - execute scheduler operations
@@ -365,6 +366,41 @@ fn handle_session_sync(db: &Arc<Database>, payload: &Value) {
       eprintln!("[session.sync] Unknown syncType: {}", sync_type);
     }
   }
+}
+
+/// Applies llm.models.fetched payload to DB: merges new models for the provider.
+/// Extracted for testability.
+fn apply_llm_models_fetched(db: &db::Database, payload: &Value) -> Result<(), String> {
+  let provider_id = payload
+    .get("providerId")
+    .and_then(|v| v.as_str())
+    .unwrap_or("");
+  let json_models = payload.get("models").and_then(|v| v.as_array());
+  if provider_id.is_empty() || json_models.is_none() {
+    return Ok(());
+  }
+  let mut settings = db
+    .get_llm_provider_settings()
+    .map_err(|e| format!("get_llm_provider_settings: {}", e))?;
+  settings.models.retain(|m| m.provider_id != provider_id);
+  for m in json_models.unwrap() {
+    let id = m.get("id").and_then(|v| v.as_str()).unwrap_or("").to_string();
+    if !id.is_empty() {
+      settings.models.push(LLMModel {
+        id: id.clone(),
+        provider_id: provider_id.to_string(),
+        name: m
+          .get("name")
+          .and_then(|v| v.as_str())
+          .unwrap_or(&id)
+          .to_string(),
+        enabled: m.get("enabled").and_then(|v| v.as_bool()).unwrap_or(true),
+        config: None,
+      });
+    }
+  }
+  db.save_llm_provider_settings(&settings)
+    .map_err(|e| format!("save_llm_provider_settings: {}", e))
 }
 
 fn normalize_llm_provider_settings(value: Option<Value>) -> Value {
@@ -579,6 +615,19 @@ fn start_sidecar(app: tauri::AppHandle, sidecar_state: &SidecarState) -> Result<
                   continue; // Don't emit to frontend
                 }
                 
+                // Intercept session.list from sidecar - replace with full DB list
+                // Sidecar only has in-memory sessions; DB has the complete set
+                if event_type == "session.list" {
+                  let state: tauri::State<'_, AppState> = app_handle.state();
+                  if let Ok(sessions) = state.db.list_sessions() {
+                    let _ = emit_server_event_app(&app_handle, &json!({
+                      "type": "session.list",
+                      "payload": { "sessions": sessions }
+                    }));
+                  }
+                  continue; // Don't forward sidecar's partial list
+                }
+                
                 // Handle scheduler.request events from sidecar
                 if event_type == "scheduler.request" {
                   if let Some(payload) = event.get("payload") {
@@ -646,7 +695,19 @@ fn start_sidecar(app: tauri::AppHandle, sidecar_state: &SidecarState) -> Result<
                   }
                   // Continue to emit to frontend
                 }
-                
+
+                // Handle llm.models.fetched - sidecar saves to JSON, we must sync to DB
+                // so llm.providers.get returns fresh data
+                if event_type == "llm.models.fetched" {
+                  if let Some(payload) = event.get("payload") {
+                    let state: tauri::State<'_, AppState> = app_handle.state();
+                    if let Err(e) = apply_llm_models_fetched(&state.db, payload) {
+                      eprintln!("[llm.models.fetched] Failed to save to DB: {}", e);
+                    }
+                  }
+                  // Continue to emit to frontend
+                }
+
                 // Only log non-streaming events to reduce noise
                 if event_type != "stream.message" {
                   eprintln!("[sidecar] → {}", event_type);
@@ -1460,6 +1521,52 @@ fn client_event(app: tauri::AppHandle, state: tauri::State<'_, AppState>, event:
       }
     }
 
+    // session.compact - enrich with session data and messages from DB for sidecar to restore
+    "session.compact" => {
+      let payload = event.get("payload").ok_or_else(|| "[session.compact] missing payload".to_string())?;
+      let session_id = payload.get("sessionId").and_then(|v| v.as_str())
+        .ok_or_else(|| "[session.compact] missing sessionId".to_string())?;
+
+      eprintln!("[session.compact] Looking up session: {}", session_id);
+
+      // Also load LLM provider settings so sidecar can resolve the model
+      let llm_settings = state.db.get_llm_provider_settings().ok();
+      let api_settings = state.db.get_api_settings().ok().flatten();
+
+      match state.db.get_session_history(session_id) {
+        Ok(Some(history)) => {
+          eprintln!("[session.compact] Found session: title='{}', messages={}", 
+            history.session.title, history.messages.len());
+
+          let enriched_event = json!({
+            "type": "session.compact",
+            "payload": {
+              "sessionId": session_id,
+              "sessionData": {
+                "title": history.session.title,
+                "cwd": history.session.cwd,
+                "model": history.session.model,
+                "allowedTools": history.session.allowed_tools,
+                "temperature": history.session.temperature
+              },
+              "messages": history.messages,
+              "llmProviderSettings": llm_settings,
+              "apiSettings": api_settings
+            }
+          });
+          send_to_sidecar(app, state.inner(), &enriched_event)
+        }
+        Ok(None) => {
+          eprintln!("[session.compact] Session {} NOT FOUND in DB!", session_id);
+          send_to_sidecar(app, state.inner(), &event)
+        }
+        Err(e) => {
+          eprintln!("[session.compact] DB error: {}", e);
+          send_to_sidecar(app, state.inner(), &event)
+        }
+      }
+    }
+
     // Settings - handled in Rust DB (with fallback to sidecar for migration)
     "settings.get" => {
       match state.db.get_api_settings() {
@@ -1933,58 +2040,44 @@ fn get_old_app_dirs() -> Vec<PathBuf> {
   dirs
 }
 
-/// Migrate ~/.localdesk/ to ~/.valera/
-fn migrate_dot_localdesk() {
+/// Migrate old memory locations to app_data_dir
+fn migrate_old_memory() {
+  let app_dir = match app_data_dir() {
+    Ok(d) => d,
+    Err(_) => return,
+  };
+  
+  let new_memory = app_dir.join("memory.md");
+  
+  // Skip if app_data_dir already has memory.md
+  if new_memory.exists() {
+    return;
+  }
+  
   let home = match home_dir() {
     Ok(h) => h,
     Err(_) => return,
   };
   
-  let old_dir = home.join(".localdesk");
-  let new_dir = home.join(".valera");
+  // Try to migrate from old locations in order of priority
+  let old_locations = [
+    home.join(".valera").join("memory.md"),
+    home.join(".localdesk").join("memory.md"),
+  ];
   
-  // Skip if old dir doesn't exist
-  if !old_dir.exists() {
-    return;
-  }
-  
-  // Skip if new dir already has memory.md (already migrated)
-  let new_memory = new_dir.join("memory.md");
-  if new_memory.exists() {
-    return;
-  }
-  
-  eprintln!("[migration] Found old ~/.localdesk/ data");
-  eprintln!("[migration] Migrating to ~/.valera/");
-  
-  // Create new directory
-  if let Err(e) = fs::create_dir_all(&new_dir) {
-    eprintln!("[migration] Failed to create ~/.valera/: {e}");
-    return;
-  }
-  
-  // Copy memory.md if exists
-  let old_memory = old_dir.join("memory.md");
-  if old_memory.exists() {
-    if let Err(e) = fs::copy(&old_memory, &new_memory) {
-      eprintln!("[migration] Failed to copy memory.md: {e}");
-    } else {
-      eprintln!("[migration] Copied memory.md");
+  for old_memory in old_locations {
+    if old_memory.exists() {
+      eprintln!("[migration] Found old memory at {}", old_memory.display());
+      eprintln!("[migration] Migrating to {}", new_memory.display());
+      
+      if let Err(e) = fs::copy(&old_memory, &new_memory) {
+        eprintln!("[migration] Failed to copy memory.md: {e}");
+      } else {
+        eprintln!("[migration] Memory migration complete!");
+      }
+      return; // Stop after first successful migration
     }
   }
-  
-  // Copy logs directory if exists
-  let old_logs = old_dir.join("logs");
-  let new_logs = new_dir.join("logs");
-  if old_logs.exists() && old_logs.is_dir() {
-    if let Err(e) = copy_dir_recursive(&old_logs, &new_logs) {
-      eprintln!("[migration] Failed to copy logs: {e}");
-    } else {
-      eprintln!("[migration] Copied logs directory");
-    }
-  }
-  
-  eprintln!("[migration] ~/.valera/ migration complete!");
 }
 
 /// Recursively copy a directory
@@ -2007,8 +2100,8 @@ fn main() {
   // Migrate data from old LocalDesk directory if needed
   migrate_from_localdesk();
   
-  // Migrate ~/.localdesk/ to ~/.valera/
-  migrate_dot_localdesk();
+  // Migrate old memory locations to app_data_dir
+  migrate_old_memory();
   
   // Initialize database
   let user_data_dir = app_data_dir().expect("Failed to get app data dir");
@@ -2038,6 +2131,8 @@ fn main() {
 
   tauri::Builder::default()
     .plugin(tauri_plugin_notification::init())
+    .plugin(tauri_plugin_i18n::init(None))
+    .plugin(tauri_plugin_locale::init())
     .manage(app_state)
     .setup(|app| {
       // Start scheduler service
@@ -2094,5 +2189,145 @@ fn main() {
     ])
     .run(tauri::generate_context!())
     .expect("error while running tauri application");
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::path::Path;
+
+    fn make_test_db() -> db::Database {
+        db::Database::new(Path::new(":memory:")).unwrap()
+    }
+
+    fn save_test_provider(db: &db::Database, id: &str, name: &str, provider_type: &str) {
+        let now = chrono::Utc::now().timestamp_millis();
+        let provider = db::LLMProvider {
+            id: id.to_string(),
+            name: name.to_string(),
+            provider_type: provider_type.to_string(),
+            base_url: Some("http://localhost:11434/v1".to_string()),
+            api_key: None,
+            enabled: true,
+            config: None,
+            created_at: now,
+            updated_at: now,
+        };
+        db.save_provider(&provider).unwrap();
+    }
+
+    #[test]
+    fn llm_models_fetched_adds_ollama_models() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-123", "Ollama", "ollama");
+
+        let payload = serde_json::json!({
+            "providerId": "ollama-123",
+            "models": [
+                { "id": "ollama-123::gpt-oss:20b", "name": "gpt-oss:20b", "enabled": true }
+            ]
+        });
+
+        apply_llm_models_fetched(&db, &payload).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert_eq!(settings.models.len(), 1);
+        assert_eq!(settings.models[0].id, "ollama-123::gpt-oss:20b");
+        assert_eq!(settings.models[0].name, "gpt-oss:20b");
+        assert_eq!(settings.models[0].provider_id, "ollama-123");
+        assert!(settings.models[0].enabled);
+    }
+
+    #[test]
+    fn llm_models_fetched_replaces_existing_models_for_provider() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-456", "Ollama", "ollama");
+        let mut settings = db.get_llm_provider_settings().unwrap();
+        settings.models.push(db::LLMModel {
+            id: "ollama-456::old-model".to_string(),
+            provider_id: "ollama-456".to_string(),
+            name: "old-model".to_string(),
+            enabled: true,
+            config: None,
+        });
+        db.save_llm_provider_settings(&settings).unwrap();
+
+        let payload = serde_json::json!({
+            "providerId": "ollama-456",
+            "models": [
+                { "id": "ollama-456::gpt-oss:20b", "name": "gpt-oss:20b", "enabled": true }
+            ]
+        });
+
+        apply_llm_models_fetched(&db, &payload).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert_eq!(settings.models.len(), 1);
+        assert_eq!(settings.models[0].id, "ollama-456::gpt-oss:20b");
+    }
+
+    #[test]
+    fn llm_models_fetched_preserves_other_providers_models() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-1", "Ollama", "ollama");
+        save_test_provider(&db, "openai-1", "OpenAI", "openai");
+        let mut settings = db.get_llm_provider_settings().unwrap();
+        settings.models.push(db::LLMModel {
+            id: "openai-1::gpt-4".to_string(),
+            provider_id: "openai-1".to_string(),
+            name: "gpt-4".to_string(),
+            enabled: true,
+            config: None,
+        });
+        db.save_llm_provider_settings(&settings).unwrap();
+
+        let payload = serde_json::json!({
+            "providerId": "ollama-1",
+            "models": [
+                { "id": "ollama-1::gpt-oss:20b", "name": "gpt-oss:20b", "enabled": true }
+            ]
+        });
+
+        apply_llm_models_fetched(&db, &payload).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert_eq!(settings.models.len(), 2);
+        let openai_model = settings.models.iter().find(|m| m.provider_id == "openai-1").unwrap();
+        assert_eq!(openai_model.name, "gpt-4");
+        let ollama_model = settings.models.iter().find(|m| m.provider_id == "ollama-1").unwrap();
+        assert_eq!(ollama_model.name, "gpt-oss:20b");
+    }
+
+    #[test]
+    fn llm_models_fetched_ignores_empty_payload() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-1", "Ollama", "ollama");
+
+        apply_llm_models_fetched(&db, &serde_json::json!({})).unwrap();
+        apply_llm_models_fetched(&db, &serde_json::json!({ "providerId": "" })).unwrap();
+        apply_llm_models_fetched(&db, &serde_json::json!({ "providerId": "x", "models": [] })).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert!(settings.models.is_empty());
+    }
+
+    #[test]
+    fn llm_models_fetched_uses_name_or_id() {
+        let db = make_test_db();
+        save_test_provider(&db, "ollama-1", "Ollama", "ollama");
+
+        let payload = serde_json::json!({
+            "providerId": "ollama-1",
+            "models": [
+                { "id": "ollama-1::m1", "name": "Display Name", "enabled": false }
+            ]
+        });
+
+        apply_llm_models_fetched(&db, &payload).unwrap();
+
+        let settings = db.get_llm_provider_settings().unwrap();
+        assert_eq!(settings.models[0].name, "Display Name");
+        assert!(!settings.models[0].enabled);
+    }
 }
 

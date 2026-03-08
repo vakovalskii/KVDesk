@@ -1,6 +1,8 @@
 import { useCallback, useEffect, useRef } from "react";
 import type { ClientEvent } from "../types";
 import { useAppStore } from "../store/useAppStore";
+import { useI18n } from "../i18n";
+import { SpinnerIcon } from "./SpinnerIcon";
 
 const DEFAULT_ALLOWED_TOOLS = "Read,Edit,Bash";
 const MAX_ROWS = 12;
@@ -17,6 +19,7 @@ interface PromptInputProps {
 }
 
 export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
+  const { t } = useI18n();
   const prompt = useAppStore((state) => state.prompt);
   const cwd = useAppStore((state) => state.cwd);
   const activeSessionId = useAppStore((state) => state.activeSessionId);
@@ -81,7 +84,7 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
       } as ClientEvent);
     } else {
       if (activeSession?.status === "running") {
-        setGlobalError("Session is still running. Please wait for it to finish.");
+        setGlobalError(t("promptInput.sessionStillRunning"));
         return;
       }
       sendEvent({ type: "session.continue", payload: { sessionId: activeSessionId, prompt: trimmedPrompt } });
@@ -104,8 +107,21 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
 }
 
 export function PromptInput({ sendEvent, onSaveMiniWorkflow, canSaveMiniWorkflow = false, saveMiniWorkflowHint, workflowPanelOpen = false, saveMiniWorkflowLoading = false }: PromptInputProps) {
+  const { t } = useI18n();
   const { prompt, setPrompt, isRunning, handleSend, handleStop } = usePromptActions(sendEvent);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
+  const activeSessionId = useAppStore((state) => state.activeSessionId);
+  const sessions = useAppStore((state) => state.sessions);
+  const compactingSessionId = useAppStore((state) => state.compactingSessionId);
+
+  const activeSession = activeSessionId ? sessions[activeSessionId] : undefined;
+  const hasHistory = (activeSession?.messages?.length ?? 0) > 1;
+  const isCompacting = compactingSessionId === activeSessionId;
+
+  const handleCompact = useCallback(() => {
+    if (!activeSessionId || isRunning || isCompacting) return;
+    sendEvent({ type: "session.compact", payload: { sessionId: activeSessionId } });
+  }, [activeSessionId, isRunning, isCompacting, sendEvent]);
 
   const handleKeyDown = (e: React.KeyboardEvent<HTMLTextAreaElement>) => {
     // Enter to send (without Shift)
@@ -166,17 +182,36 @@ export function PromptInput({ sendEvent, onSaveMiniWorkflow, canSaveMiniWorkflow
           <textarea
             rows={1}
             className="flex-1 resize-none bg-transparent py-1.5 text-sm text-ink-800 placeholder:text-muted focus:outline-none"
-            placeholder="Describe what you want agent to handle..."
+            placeholder={t("promptInput.placeholder")}
             value={prompt}
             onChange={(e) => setPrompt(e.target.value)}
             onKeyDown={handleKeyDown}
             onInput={handleInput}
             ref={promptRef}
           />
+          {hasHistory && !isRunning && (
+            <button
+              className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full border transition-colors ${isCompacting ? "border-accent/40 text-accent cursor-not-allowed opacity-60" : "border-ink-900/15 text-muted hover:border-accent/40 hover:text-accent"}`}
+              onClick={handleCompact}
+              disabled={isCompacting}
+              title={t("promptInput.compactTitle")}
+              aria-label={t("promptInput.compactAriaLabel")}
+            >
+              {isCompacting ? (
+                <SpinnerIcon className="h-4 w-4" />
+              ) : (
+                <svg viewBox="0 0 24 24" className="h-4 w-4" fill="none" stroke="currentColor" strokeWidth="2" aria-hidden="true">
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 9l-7 7-7-7" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 3H5" />
+                  <path strokeLinecap="round" strokeLinejoin="round" d="M19 15H5" />
+                </svg>
+              )}
+            </button>
+          )}
           <button
             className={`flex h-9 w-9 shrink-0 items-center justify-center rounded-full transition-colors ${isRunning ? "bg-error text-white hover:bg-error/90" : "bg-accent text-white hover:bg-accent-hover"}`}
             onClick={isRunning ? handleStop : handleSend}
-            aria-label={isRunning ? "Stop session" : "Send prompt"}
+            aria-label={isRunning ? t("promptInput.stopSession") : t("promptInput.sendPrompt")}
           >
             {isRunning ? (
               <svg viewBox="0 0 24 24" className="h-4 w-4" aria-hidden="true"><rect x="6" y="6" width="12" height="12" rx="2" fill="currentColor" /></svg>
@@ -186,7 +221,7 @@ export function PromptInput({ sendEvent, onSaveMiniWorkflow, canSaveMiniWorkflow
           </button>
         </div>
         <div className="mt-2 px-2 text-xs text-muted text-center">
-          Press <span className="font-medium text-ink-700">Enter</span> to send • <span className="font-medium text-ink-700">Shift + Enter</span> for new line
+          {t("promptInput.keyboardHint")}
         </div>
       </div>
     </section>

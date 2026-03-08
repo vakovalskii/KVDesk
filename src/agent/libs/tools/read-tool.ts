@@ -66,6 +66,30 @@ export async function executeReadTool(
     };
   }
 
+  // Block reading .env files — they contain secrets (API keys, tokens, passwords)
+  const fileName = args.file_path.split('/').pop()?.toLowerCase() || '';
+  if (fileName === '.env' || fileName.startsWith('.env.')) {
+    return {
+      success: false,
+      error: `🔒 Access denied: Cannot read .env files — they may contain secrets (API keys, tokens, passwords).\n\n` +
+             `If a skill requires environment variables, they should be:\n` +
+             `1. Set in the user's system environment (export VAR=value)\n` +
+             `2. Declared in the skill's dependencies, not read directly from .env files\n\n` +
+             `Ask the user to provide the required values or set them as environment variables.`
+    };
+  }
+
+  // Block reading skill script files — they should be executed, not read
+  const normalizedPath = args.file_path.replace(/\\/g, '/');
+  if (normalizedPath.match(/\/skills\/[^/]+\/scripts\//) || normalizedPath.match(/^skills\/[^/]+\/scripts\//)) {
+    return {
+      success: false,
+      error: `🚫 Do not read skill script source code. Execute scripts directly via bash:\n\n` +
+             `bash: cd <skill_directory> && python scripts/<script_name>.py [args]\n\n` +
+             `Use \`load_skill\` with operation "get" to read the skill's SKILL.md instructions.`
+    };
+  }
+
   // Security check
   if (!context.isPathSafe(args.file_path)) {
     return {

@@ -83,7 +83,7 @@ export function getSystemPrompt(cwd: string, toolsSummary: string = ''): string 
   const cmds = getShellCommands();
   
   // Build skills section (dynamically generated based on enabled skills)
-  const skillsSection = generateSkillsPromptSection();
+  const skillsSection = generateSkillsPromptSection(cwd);
 
   // Replace placeholders
   template = template

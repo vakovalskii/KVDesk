@@ -45,7 +45,7 @@ type ChatMessage = {
 
 // Logging - organized by session folders with turn-based request/response files
 const getSessionLogsDir = (sessionId: string) => {
-  const baseDir = join(homedir(), '.valera', 'logs', 'sessions', sessionId);
+  const baseDir = join(homedir(), 'Library', 'Application Support', 'ValeDesk', 'logs', 'sessions', sessionId);
   if (!existsSync(baseDir)) {
     mkdirSync(baseDir, { recursive: true });
   }
@@ -263,6 +263,8 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         } else if (provider.type === 'zai') {
           const prefix = provider.zaiApiPrefix === 'coding' ? 'api/coding/paas' : 'api/paas';
           baseURL = `https://api.z.ai/${prefix}/v4`;
+        } else if (provider.type === 'ollama') {
+          baseURL = provider.baseUrl || 'http://localhost:11434/v1';
         } else {
           baseURL = provider.baseUrl || '';
         }
@@ -273,23 +275,71 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       } else {
         // Use legacy API settings (apiKey/baseURL from file; model from session or file)
         const guiSettings = loadApiSettings();
-        
-        if (!guiSettings || !guiSettings.baseUrl) {
-          throw new Error('API settings not configured. If you added an LLM Provider, make sure to select a provider model (with :: in the name) from the model dropdown. Otherwise, set Base URL and API Key in Settings (⚙️).');
-        }
-        
-        if (!guiSettings.apiKey) {
-          throw new Error('API Key is missing. Please configure it in Settings (⚙️).');
-        }
+        const legacyConfigured = guiSettings?.baseUrl && guiSettings?.apiKey;
 
-        apiKey = guiSettings.apiKey;
-        baseURL = guiSettings.baseUrl;
-        modelName = session.model || guiSettings.model || '';
-        if (!modelName) {
-          throw new Error('Model not set. Set default model in Settings or Scheduler default model (⚙️).');
+        if (legacyConfigured) {
+          apiKey = guiSettings!.apiKey;
+          baseURL = guiSettings!.baseUrl;
+          modelName = session.model || guiSettings!.model || '';
+          if (!modelName) {
+            throw new Error('Model not set. Set default model in Settings or Scheduler default model (⚙️).');
+          }
+          temperature = session.temperature;
+          providerInfo = 'Legacy API';
+        } else {
+          // Fallback: try to find the model by name in LLM providers
+          // This handles sessions whose model was saved without the providerId:: prefix
+          const llmSettings = loadLLMProviderSettings();
+          const sessionModelName = session.model;
+          let resolvedProvider: import('../types.js').LLMProvider | undefined;
+          let resolvedModelId: string | undefined;
+
+          if (llmSettings && sessionModelName) {
+            // Look for an exact match by model id or name in any enabled provider
+            const matchingModel = llmSettings.models.find(m =>
+              m.id === sessionModelName || m.name === sessionModelName
+            );
+            if (matchingModel) {
+              resolvedProvider = llmSettings.providers.find(p => p.id === matchingModel.providerId && p.enabled !== false);
+              // Extract model ID from full id (providerId::modelId), not display name
+              resolvedModelId = matchingModel.id.includes('::') ? matchingModel.id.split('::')[1] : matchingModel.name;
+            }
+
+            // If no exact match, pick the first enabled model from any enabled provider
+            if (!resolvedProvider) {
+              const firstEnabled = llmSettings.models.find(m => m.enabled !== false);
+              if (firstEnabled) {
+                resolvedProvider = llmSettings.providers.find(p => p.id === firstEnabled.providerId && p.enabled !== false);
+                // Extract model ID from full id (providerId::modelId), not display name
+                resolvedModelId = firstEnabled.id.includes('::') ? firstEnabled.id.split('::')[1] : firstEnabled.name;
+                console.warn(`[OpenAI Runner] Model "${sessionModelName}" not found in providers, falling back to "${resolvedModelId}"`);
+              }
+            }
+          }
+
+          if (resolvedProvider && resolvedModelId) {
+            apiKey = resolvedProvider.apiKey;
+            if (resolvedProvider.type === 'openrouter') {
+              baseURL = 'https://openrouter.ai/api/v1';
+            } else if (resolvedProvider.type === 'zai') {
+              const prefix = resolvedProvider.zaiApiPrefix === 'coding' ? 'api/coding/paas' : 'api/paas';
+              baseURL = `https://api.z.ai/${prefix}/v4`;
+            } else if (resolvedProvider.type === 'ollama') {
+              baseURL = resolvedProvider.baseUrl || 'http://localhost:11434/v1';
+            } else {
+              baseURL = resolvedProvider.baseUrl || '';
+            }
+            modelName = resolvedModelId;
+            temperature = session.temperature;
+            providerInfo = `${resolvedProvider.name} (auto-resolved from model name)`;
+          } else {
+            throw new Error(
+              'API settings not configured. If you added an LLM Provider, make sure to ' +
+              'select a provider model (with :: in the name) from the model dropdown. ' +
+              'Otherwise, set Base URL and API Key in Settings (⚙️).'
+            );
+          }
         }
-        temperature = session.temperature; // undefined means don't send
-        providerInfo = 'Legacy API';
       }
 
       const debug = !!(process.env.VALERA_DEBUG || process.env.DEBUG);
@@ -322,7 +372,8 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       };
 
       // Initialize OpenAI client with custom fetch and timeout
-      const REQUEST_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes for long operations
+      const guiSettingsForTimeout = loadApiSettings();
+      const REQUEST_TIMEOUT_MS = guiSettingsForTimeout?.requestTimeoutMs || 5 * 60 * 1000; // default 5 minutes
       const client = new OpenAI({
         apiKey: apiKey || 'dummy-key',
         baseURL: baseURL,
@@ -385,7 +436,7 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
           const { join } = await import('path');
           const { homedir } = await import('os');
           
-          const memoryPath = join(homedir(), '.valera', 'memory.md');
+          const memoryPath = join(homedir(), 'Library', 'Application Support', 'ValeDesk', 'memory.md');
           
           await access(memoryPath, constants.F_OK);
           const content = await readFile(memoryPath, 'utf-8');
@@ -1450,6 +1501,25 @@ DO NOT call the same tool again with similar arguments.`
       
       // Extract detailed error message from API response
       let errorMessage = error instanceof Error ? error.message : String(error);
+
+      // Detect context length / max tokens errors and emit compact request
+      const isContextLengthError = (
+        errorMessage.includes('context_length_exceeded') ||
+        errorMessage.includes('maximum context length') ||
+        errorMessage.includes('context window') ||
+        errorMessage.includes('too many tokens') ||
+        errorMessage.includes('max_tokens') ||
+        (error.status === 400 && (lastErrorBody || '').toLowerCase().includes('context')) ||
+        (error.status === 400 && (lastErrorBody || '').toLowerCase().includes('token'))
+      );
+
+      if (isContextLengthError) {
+        console.warn('[OpenAI Runner] Context length exceeded — requesting compact');
+        onEvent({
+          type: "session.compact_needed" as any,
+          payload: { sessionId: session.id, nextPrompt: prompt } as any
+        });
+      }
 
       sendMessage('result', {
         subtype: 'error',

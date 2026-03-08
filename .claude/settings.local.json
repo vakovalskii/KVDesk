@@ -13,7 +13,17 @@
       "Bash(echo:*)",
       "Bash(node:*)",
       "Bash(gh api:*)",
-      "Bash(codex exec:*)"
+      "Bash(codex exec:*)",
+      "Bash(readlink \"$HOME/.claude/skills/find-skills\")",
+      "Read(//d/My Projects/Projects Another/ValeDesk/$HOME/.claude/skills/**)",
+      "Bash(codex:*)",
+      "Bash(ls:*)",
+      "Read(//dev/**)",
+      "Bash(\"C:/Users/steel/AppData/Local/Temp/codex-prompt.txt\")",
+      "Bash(\"C:/Users/steel/AppData/Local/Temp/codex-review.txt\":*)",
+      "Bash(gh pr:*)",
+      "Bash(npm ls:*)",
+      "Bash(npm install:*)"
     ]
   }
 }
