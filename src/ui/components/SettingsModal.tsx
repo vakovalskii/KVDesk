@@ -239,8 +239,12 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
   }, []);
 
   const toggleSkill = useCallback((skillId: string, enabled: boolean) => {
+    console.log("[SettingsModal] toggleSkill:", skillId, enabled);
     getPlatform().sendClientEvent({ type: "skills.toggle", payload: { skillId, enabled } });
-    setSkills(prev => prev.map(s => s.id === skillId ? { ...s, enabled } : s));
+    setSkills(prev => {
+      console.log("[SettingsModal] optimistic update, prev count:", prev.length);
+      return prev.map(s => s.id === skillId ? { ...s, enabled } : s);
+    });
   }, []);
 
   const handleAddRepository = useCallback((repo: Omit<SkillRepository, "id">) => {
@@ -262,25 +266,44 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
 
   // Load skills on mount
   useEffect(() => {
-    loadSkills();
-    
+    console.log("[SettingsModal] registering skills onServerEvent listener");
     const unsubscribe = getPlatform().onServerEvent((event) => {
+      console.log("[SettingsModal] onServerEvent received:", event.type, event.payload);
       if (event.type === "skills.loaded") {
-        if (Array.isArray(event.payload?.skills) && event.payload.skills.length > 0) {
-          setSkills(event.payload.skills);
+        console.log("[SettingsModal] skills.loaded - skills count:", event.payload?.skills?.length, "repos count:", event.payload?.repositories?.length);
+        console.log("[SettingsModal] skills sample:", JSON.stringify(event.payload?.skills?.[0]));
+        if (Array.isArray(event.payload?.skills)) {
+          try {
+            setSkills(event.payload.skills);
+            console.log("[SettingsModal] setSkills OK");
+          } catch (e) {
+            console.error("[SettingsModal] setSkills THREW:", e);
+          }
         }
-        if (Array.isArray(event.payload?.repositories) && event.payload.repositories.length > 0) {
-          setSkillsRepositories(event.payload.repositories);
+        if (Array.isArray(event.payload?.repositories)) {
+          try {
+            setSkillsRepositories(event.payload.repositories);
+            console.log("[SettingsModal] setSkillsRepositories OK");
+          } catch (e) {
+            console.error("[SettingsModal] setSkillsRepositories THREW:", e);
+          }
         }
         setSkillsLastFetched(event.payload?.lastFetched);
         setSkillsLoading(false);
       } else if (event.type === "skills.error") {
+        console.error("[SettingsModal] skills.error:", event.payload.message);
         setSkillsError(event.payload.message);
         setSkillsLoading(false);
       }
+    }, () => {
+      console.log("[SettingsModal] onReady - calling loadSkills");
+      loadSkills();
     });
 
-    return () => unsubscribe();
+    return () => {
+      console.log("[SettingsModal] unsubscribing skills listener");
+      unsubscribe();
+    };
   }, [loadSkills]);
 
   const handleSave = async () => {
@@ -376,7 +399,17 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
   };
 
   useEffect(() => {
+    const onError = (event: ErrorEvent) => {
+      console.error("[SettingsModal] window.onerror:", event.message, event.filename, event.lineno, event.error);
+    };
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error("[SettingsModal] unhandledrejection:", event.reason);
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
     return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
       if ((window as any).__llmProvidersUnsubscribe) {
         (window as any).__llmProvidersUnsubscribe();
       }
@@ -385,6 +418,8 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
       }
     };
   }, []);
+
+  console.log("[SettingsModal] render - activeTab:", activeTab, "skillsLoading:", skillsLoading, "skills:", skills.length);
 
   const roleModelOptions: RoleModelOption[] = (() => {
     const enabledModels = llmModels.filter(m => m.enabled);
@@ -401,10 +436,14 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
   })();
 
   return (
-    <Dialog.Root open onOpenChange={onClose}>
+    <Dialog.Root open onOpenChange={(open) => {
+        console.error('[SettingsModal] Dialog.onOpenChange called! open=', open);
+        console.trace('[SettingsModal] onOpenChange trace');
+        onClose();
+      }}>
       <Dialog.Portal>
         <Dialog.Overlay className="fixed top-24 left-0 right-0 bottom-0 z-50 bg-black/30 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-16 z-50 -translate-x-1/2 w-full max-w-3xl max-h-[calc(100vh-6rem)] rounded-2xl border border-ink-900/10 bg-surface shadow-2xl flex flex-col overflow-hidden">
+        <Dialog.Content className="fixed left-1/2 top-16 z-50 -translate-x-1/2 w-full max-w-3xl max-h-[calc(100vh-6rem)] rounded-2xl border border-ink-900/10 bg-surface shadow-2xl flex flex-col overflow-clip">
           <div className="flex-shrink-0 px-6 pt-6 pb-4 border-b border-ink-900/10">
             <Dialog.Title className="text-xl font-semibold text-ink-900">
               {t('settings.title')}

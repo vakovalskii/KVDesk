@@ -1,4 +1,5 @@
-import { useState } from "react";
+import { useState, Component } from "react";
+import type { ReactNode } from "react";
 import type { Skill, SkillRepository, SkillRepositoryType } from "../types";
 import { useI18n } from "../i18n";
 import { getPlatform } from "../platform";
@@ -43,7 +44,43 @@ function typeLabel(type: SkillRepositoryType, t: (key: string) => string): strin
   return t("skillsTab.typeHttp");
 }
 
-export function SkillsTab({
+class SkillsTabErrorBoundary extends Component<{ children: ReactNode }, { error: Error | null }> {
+  constructor(props: { children: ReactNode }) {
+    super(props);
+    this.state = { error: null };
+  }
+
+  static getDerivedStateFromError(error: Error) {
+    return { error };
+  }
+
+  componentDidCatch(error: Error, info: { componentStack: string }) {
+    console.error("[SkillsTabErrorBoundary] caught render error:", error);
+    console.error("[SkillsTabErrorBoundary] component stack:", info.componentStack);
+  }
+
+  render() {
+    if (this.state.error) {
+      return (
+        <div className="p-6 text-center text-red-500">
+          <p className="font-medium">Failed to render skills tab</p>
+          <p className="text-sm mt-1 text-ink-500">{this.state.error.message}</p>
+        </div>
+      );
+    }
+    return this.props.children;
+  }
+}
+
+export function SkillsTab(props: SkillsTabProps) {
+  return (
+    <SkillsTabErrorBoundary>
+      <SkillsTabInner {...props} />
+    </SkillsTabErrorBoundary>
+  );
+}
+
+function SkillsTabInner({
   skills,
   repositories,
   lastFetched,
@@ -56,6 +93,7 @@ export function SkillsTab({
   onRemoveRepository,
   onToggleRepository
 }: SkillsTabProps) {
+  console.log("[SkillsTabInner] render - skills:", skills?.length, "repos:", repositories?.length, "loading:", loading);
   const { t } = useI18n();
   const [searchQuery, setSearchQuery] = useState("");
   const [showOnlyEnabled, setShowOnlyEnabled] = useState(false);
@@ -73,8 +111,8 @@ export function SkillsTab({
   // Filter skills
   const filteredSkills = skills.filter(skill => {
     const matchesSearch = !searchQuery ||
-      skill.name.toLowerCase().includes(searchQuery.toLowerCase()) ||
-      skill.description.toLowerCase().includes(searchQuery.toLowerCase());
+      (skill.name?.toLowerCase() ?? '').includes(searchQuery.toLowerCase()) ||
+      (skill.description?.toLowerCase() ?? '').includes(searchQuery.toLowerCase());
     const matchesEnabled = !showOnlyEnabled || skill.enabled;
     const matchesCategory = !selectedCategory || skill.category === selectedCategory;
     return matchesSearch && matchesEnabled && matchesCategory;
@@ -450,7 +488,7 @@ function SkillCard({
   t: (key: string) => string;
 }) {
   return (
-    <div className={`p-4 border rounded-lg transition-colors ${
+    <div className={`p-4 border rounded-lg ${
       skill.enabled
         ? 'border-accent/30 bg-accent/5'
         : 'border-ink-200 bg-white hover:border-ink-300'
