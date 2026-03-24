@@ -312,6 +312,41 @@ async function fetchFromHttp(repo: SkillRepository): Promise<Skill[]> {
 }
 
 /**
+ * Fetch skills from a SkillsBD catalog API.
+ * SkillsBD is an open-source skill registry; actual skill files live on GitHub.
+ * Convention: {baseUrl}/api/skills returns the full catalog.
+ */
+async function fetchFromSkillsbd(repo: SkillRepository): Promise<Skill[]> {
+  const baseUrl = repo.url.replace(/\/$/, "");
+  const response = await fetch(`${baseUrl}/api/skills`);
+
+  if (!response.ok) {
+    throw new Error(`SkillsBD API error: ${response.status}`);
+  }
+
+  const items: any[] = await response.json();
+
+  return items.map(item => ({
+    id: item.id,
+    name: item.name,
+    description: item.description,
+    category: item.category,
+    author: item.authorName,
+    repoPath: `${item.owner}/${item.repo}`,
+    repositoryId: repo.id,
+    enabled: false,
+    owner: item.owner,
+    repo: item.repo,
+    installs: item.installs,
+    trending24h: item.trending24h,
+    tags: item.tags,
+    featured: item.featured,
+    authorName: item.authorName,
+    telegramLink: item.telegramLink,
+  }));
+}
+
+/**
  * Fetch skill list from all enabled repositories
  */
 export async function fetchSkillsFromMarketplace(): Promise<Skill[]> {
@@ -334,6 +369,9 @@ export async function fetchSkillsFromMarketplace(): Promise<Skill[]> {
           break;
         case "http":
           repoSkills = await fetchFromHttp(repo);
+          break;
+        case "skillsbd":
+          repoSkills = await fetchFromSkillsbd(repo);
           break;
         default:
           console.warn(`[SkillsLoader] Unknown repository type: ${(repo as any).type}`);
@@ -394,6 +432,9 @@ export async function downloadSkill(skillId: string, cwd?: string): Promise<stri
     case "http":
       await downloadSkillFromHttp(skill, repo, skillCacheDir);
       break;
+    case "skillsbd":
+      await downloadSkillFromSkillsbd(skill, repo, skillCacheDir);
+      break;
     default:
       throw new Error(`Unsupported repository type: ${(repo as any).type}`);
   }
@@ -425,6 +466,45 @@ async function downloadSkillFromGitHub(
 
   const contents: GitHubContent[] = await response.json();
   await downloadContents(contents, skillCacheDir, skill.repoPath, urlInfo);
+}
+
+async function downloadSkillFromSkillsbd(
+  skill: Skill,
+  repo: SkillRepository,
+  skillCacheDir: string
+): Promise<void> {
+  if (!skill.owner || !skill.repo) {
+    throw new Error(`Skill ${skill.id} missing owner/repo for GitHub download`);
+  }
+
+  // Fetch skill contents from GitHub using owner/repo from skillsbd catalog
+  const contentsUrl = `https://api.github.com/repos/${skill.owner}/${skill.repo}/contents/`;
+  const response = await fetch(contentsUrl, {
+    headers: {
+      "Accept": "application/vnd.github.v3+json",
+      "User-Agent": "ValeDesk"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.status}`);
+  }
+
+  const contents: GitHubContent[] = await response.json();
+  await downloadContents(contents, skillCacheDir, "", { owner: skill.owner, repo: skill.repo, branch: "main" });
+
+  // Fire-and-forget: track installation on skillsbd
+  const baseUrl = repo.url.replace(/\/$/, "");
+  fetch(`${baseUrl}/api/skills/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: skill.name,
+      owner: skill.owner,
+      repo: skill.repo,
+      v: skill.version || "1.0"
+    })
+  }).catch(err => console.warn("[SkillsLoader] Install tracking failed:", err));
 }
 
 async function downloadSkillFromHttp(

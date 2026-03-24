@@ -29,18 +29,21 @@ const DEFAULT_FORM: RepoFormState = { name: "", type: "github", url: "" };
 function urlPlaceholder(type: SkillRepositoryType, t: (key: string) => string): string {
   if (type === "github") return t("skillsTab.urlPlaceholderGithub");
   if (type === "local") return t("skillsTab.urlPlaceholderLocal");
+  if (type === "skillsbd") return t("skillsTab.urlPlaceholderSkillsbd");
   return t("skillsTab.urlPlaceholderHttp");
 }
 
 function typeBadgeClass(type: SkillRepositoryType): string {
   if (type === "github") return "bg-purple-100 text-purple-700";
   if (type === "local") return "bg-green-100 text-green-700";
+  if (type === "skillsbd") return "bg-orange-100 text-orange-700";
   return "bg-blue-100 text-blue-700";
 }
 
 function typeLabel(type: SkillRepositoryType, t: (key: string) => string): string {
   if (type === "github") return t("skillsTab.typeGithub");
   if (type === "local") return t("skillsTab.typeLocal");
+  if (type === "skillsbd") return t("skillsTab.typeSkillsbd");
   return t("skillsTab.typeHttp");
 }
 
@@ -426,6 +429,7 @@ function RepoDialog({
               <option value="github">{t("skillsTab.typeGithub")}</option>
               <option value="local">{t("skillsTab.typeLocal")}</option>
               <option value="http">{t("skillsTab.typeHttp")}</option>
+              <option value="skillsbd">{t("skillsTab.typeSkillsbd")}</option>
             </select>
           </div>
 
@@ -497,6 +501,11 @@ function SkillCard({
         <div className="flex-1 min-w-0">
           <div className="flex items-center gap-2 flex-wrap">
             <h4 className="font-medium text-ink-900 truncate">{skill.name}</h4>
+            {skill.featured && (
+              <span className="px-1.5 py-0.5 text-xs font-medium bg-yellow-100 text-yellow-700 rounded">
+                {t("skillsTab.featured")}
+              </span>
+            )}
             {skill.category && (
               <span className="px-2 py-0.5 text-xs font-medium bg-ink-100 text-ink-600 rounded">
                 {skill.category}
@@ -509,10 +518,27 @@ function SkillCard({
             )}
           </div>
           <p className="mt-1 text-sm text-ink-600 line-clamp-2">{skill.description}</p>
+          {skill.tags && skill.tags.length > 0 && (
+            <div className="mt-1.5 flex flex-wrap gap-1">
+              {skill.tags.map(tag => (
+                <span key={tag} className="px-1.5 py-0.5 text-xs bg-ink-100 text-ink-500 rounded">
+                  {tag}
+                </span>
+              ))}
+            </div>
+          )}
           <div className="mt-2 flex items-center gap-3 text-xs text-ink-400">
             {skill.author && <span>by {skill.author}</span>}
             {skill.version && <span>v{skill.version}</span>}
             {skill.license && <span>{skill.license}</span>}
+            {skill.installs !== undefined && (
+              <span className="flex items-center gap-1">
+                <svg className="w-3 h-3" fill="none" viewBox="0 0 24 24" stroke="currentColor">
+                  <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M4 16v1a3 3 0 003 3h10a3 3 0 003-3v-1m-4-4l-4 4m0 0l-4-4m4 4V4" />
+                </svg>
+                {skill.installs} {t("skillsTab.installs")}
+              </span>
+            )}
           </div>
         </div>
         <label className="flex items-center ml-4 cursor-pointer">

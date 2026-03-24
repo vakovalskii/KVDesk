@@ -13,7 +13,7 @@ export interface SkillMetadata {
   allowedTools?: string[];
 }
 
-export type SkillRepositoryType = "github" | "local" | "http";
+export type SkillRepositoryType = "github" | "local" | "http" | "skillsbd";
 
 export interface SkillRepository {
   id: string;
@@ -36,6 +36,15 @@ export interface Skill {
   repositoryId: string; // Which repository this skill belongs to
   enabled: boolean;
   lastUpdated?: number;
+  // Skillsbd-specific optional fields
+  owner?: string;
+  repo?: string;
+  installs?: number;
+  trending24h?: number;
+  tags?: string[];
+  featured?: boolean;
+  authorName?: string;
+  telegramLink?: string;
 }
 
 export interface SkillsSettings {
@@ -56,6 +65,14 @@ const DEFAULT_REPOSITORY: SkillRepository = {
   name: "Default",
   type: "github",
   url: "https://api.github.com/repos/vakovalskii/LocalDesk-Skills/contents/skills",
+  enabled: true
+};
+
+const DEFAULT_SKILLSBD_REPOSITORY: SkillRepository = {
+  id: "skillsbd-default",
+  name: "SkillsBD",
+  type: "skillsbd",
+  url: "https://skillsbd.ru",
   enabled: true
 };
 
@@ -112,9 +129,15 @@ export function loadSkillsSettings(): SkillsSettings {
         };
       }
 
-      const repos = raw.repositories && raw.repositories.length > 0
+      let repos = raw.repositories && raw.repositories.length > 0
         ? raw.repositories
         : [{ ...DEFAULT_REPOSITORY }];
+
+      // Migration: add default skillsbd repository if none exists
+      if (!repos.some(r => r.type === "skillsbd")) {
+        repos = [...repos, { ...DEFAULT_SKILLSBD_REPOSITORY }];
+      }
+
       return {
         repositories: repos,
         skills: (raw.skills || []).map(s => ({
@@ -129,7 +152,7 @@ export function loadSkillsSettings(): SkillsSettings {
   }
 
   return {
-    repositories: [{ ...DEFAULT_REPOSITORY }],
+    repositories: [{ ...DEFAULT_REPOSITORY }, { ...DEFAULT_SKILLSBD_REPOSITORY }],
     skills: []
   };
 }
