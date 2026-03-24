@@ -152,7 +152,7 @@ export function loadSkillsSettings(): SkillsSettings {
   }
 
   return {
-    repositories: [{ ...DEFAULT_REPOSITORY }, { ...DEFAULT_SKILLSBD_REPOSITORY }],
+    repositories: [{ ...DEFAULT_SKILLSBD_REPOSITORY }, { ...DEFAULT_REPOSITORY }],
     skills: []
   };
 }
