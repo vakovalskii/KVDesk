@@ -19,10 +19,23 @@ describe("skills-store", () => {
   it("returns default repository when no settings file exists", async () => {
     const { loadSkillsSettings } = await import("../src/agent/libs/skills-store.ts");
     const settings = loadSkillsSettings();
-    expect(settings.repositories).toHaveLength(1);
-    expect(settings.repositories[0].type).toBe("github");
-    expect(settings.repositories[0].id).toBe("default");
+    expect(settings.repositories).toHaveLength(2);
+    expect(settings.repositories[0].type).toBe("skillsbd");
+    expect(settings.repositories[0].id).toBe("skillsbd-default");
+    expect(settings.repositories[1].type).toBe("github");
+    expect(settings.repositories[1].id).toBe("default");
     expect(settings.skills).toHaveLength(0);
+  });
+
+  it("default settings include skillsbd-default repository", async () => {
+    const { loadSkillsSettings } = await import("../src/agent/libs/skills-store.ts");
+    const settings = loadSkillsSettings();
+    const skillsbdRepo = settings.repositories.find(r => r.type === "skillsbd");
+    expect(skillsbdRepo).toBeDefined();
+    expect(skillsbdRepo?.id).toBe("skillsbd-default");
+    expect(skillsbdRepo?.name).toBe("SkillsBD");
+    expect(skillsbdRepo?.url).toBe("https://skillsbd.ru");
+    expect(skillsbdRepo?.enabled).toBe(true);
   });
 
   it("migrates legacy marketplaceUrl to repositories", async () => {
@@ -104,5 +117,57 @@ describe("skills-store", () => {
     const skill = settings.skills.find(s => s.id === "s1");
     expect(skill?.enabled).toBe(true); // preserved
     expect(skill?.name).toBe("S1 Updated"); // updated
+  });
+
+  it("migrates settings without skillsbd repository by adding it", async () => {
+    const settingsWithoutSkillsbd = {
+      repositories: [
+        { id: "default", name: "Default", type: "github" as const, url: "https://api.github.com/repos/example/repo/contents/skills", enabled: true }
+      ],
+      skills: []
+    };
+    writeFileSync(join(tmpDir, "skills-settings.json"), JSON.stringify(settingsWithoutSkillsbd), "utf-8");
+
+    const { loadSkillsSettings } = await import("../src/agent/libs/skills-store.ts");
+    const settings = loadSkillsSettings();
+
+    expect(settings.repositories).toHaveLength(2);
+    const skillsbdRepo = settings.repositories.find(r => r.type === "skillsbd");
+    expect(skillsbdRepo).toBeDefined();
+    expect(skillsbdRepo?.id).toBe("skillsbd-default");
+    expect(skillsbdRepo?.url).toBe("https://skillsbd.ru");
+  });
+
+  it("does not duplicate skillsbd repository if already exists", async () => {
+    const settingsWithSkillsbd = {
+      repositories: [
+        { id: "default", name: "Default", type: "github" as const, url: "https://api.github.com/repos/example/repo/contents/skills", enabled: true },
+        { id: "custom-skillsbd", name: "Custom SkillsBD", type: "skillsbd" as const, url: "https://custom.skillsbd.com", enabled: true }
+      ],
+      skills: []
+    };
+    writeFileSync(join(tmpDir, "skills-settings.json"), JSON.stringify(settingsWithSkillsbd), "utf-8");
+
+    const { loadSkillsSettings } = await import("../src/agent/libs/skills-store.ts");
+    const settings = loadSkillsSettings();
+
+    expect(settings.repositories).toHaveLength(2);
+    const skillsbdRepos = settings.repositories.filter(r => r.type === "skillsbd");
+    expect(skillsbdRepos).toHaveLength(1);
+    expect(skillsbdRepos[0].id).toBe("custom-skillsbd");
+  });
+
+  it("addRepository works with skillsbd type", async () => {
+    const { addRepository, loadSkillsSettings } = await import("../src/agent/libs/skills-store.ts");
+    const added = addRepository({ name: "Custom SkillsBD", type: "skillsbd", url: "https://custom.skillsbd.com", enabled: true });
+
+    expect(added.id).toBeTruthy();
+    expect(added.type).toBe("skillsbd");
+    expect(added.url).toBe("https://custom.skillsbd.com");
+
+    const settings = loadSkillsSettings();
+    const found = settings.repositories.find(r => r.id === added.id);
+    expect(found).toBeDefined();
+    expect(found?.type).toBe("skillsbd");
   });
 });

@@ -183,7 +183,7 @@ export type ServerEvent =
   | { type: "scheduler.request"; payload: { requestId: string; operation: string; params: Record<string, any> } };
 
 // Skill types
-export type SkillRepositoryType = "github" | "local" | "http";
+export type SkillRepositoryType = "github" | "local" | "http" | "skillsbd";
 
 export interface SkillRepository {
   id: string;
@@ -206,6 +206,15 @@ export interface Skill {
   repositoryId: string;
   enabled: boolean;
   lastUpdated?: number;
+  // Skillsbd-specific optional fields
+  owner?: string;
+  repo?: string;
+  installs?: number;
+  trending24h?: number;
+  tags?: string[];
+  featured?: boolean;
+  authorName?: string;
+  telegramLink?: string;
 }
 
 // Task creation types

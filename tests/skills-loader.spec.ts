@@ -225,3 +225,181 @@ describe("legacy skills loader test (github with branch)", () => {
     expect(rawUrls[0]).toContain("/feature/");
   });
 });
+
+describe("fetchFromSkillsbd (via fetchSkillsFromMarketplace)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fetches skills catalog from skillsbd API and maps all fields", async () => {
+    const catalogResponse = [
+      {
+        id: "pdf-processor",
+        name: "PDF Processor",
+        description: "Process PDF files",
+        category: "productivity",
+        authorName: "John Doe",
+        owner: "johndoe",
+        repo: "pdf-skill",
+        installs: 150,
+        trending24h: 10,
+        tags: ["pdf", "productivity"],
+        featured: true,
+        telegramLink: "https://t.me/johndoe"
+      },
+      {
+        id: "image-analyzer",
+        name: "Image Analyzer",
+        description: "Analyze images",
+        category: "ai",
+        authorName: "Jane Smith",
+        owner: "janesmith",
+        repo: "image-skill",
+        installs: 75,
+        trending24h: 5,
+        tags: ["ai", "vision"],
+        featured: false,
+        telegramLink: null
+      }
+    ];
+
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => catalogResponse
+    });
+
+    global.fetch = fetchMock as any;
+
+    getEnabledRepositories.mockReturnValue([
+      { id: "skillsbd1", name: "SkillsBD", type: "skillsbd", url: "https://skillsbd.ru", enabled: true }
+    ]);
+
+    const { fetchSkillsFromMarketplace } = await import("../src/agent/libs/skills-loader.ts");
+    const skills = await fetchSkillsFromMarketplace();
+
+    expect(skills.length).toBe(2);
+    expect(fetchMock).toHaveBeenCalledWith("https://skillsbd.ru/api/skills");
+
+    const skill1 = skills[0];
+    expect(skill1.id).toBe("pdf-processor");
+    expect(skill1.name).toBe("PDF Processor");
+    expect(skill1.description).toBe("Process PDF files");
+    expect(skill1.category).toBe("productivity");
+    expect(skill1.author).toBe("John Doe");
+    expect(skill1.owner).toBe("johndoe");
+    expect(skill1.repo).toBe("pdf-skill");
+    expect(skill1.repoPath).toBe("johndoe/pdf-skill");
+    expect(skill1.repositoryId).toBe("skillsbd1");
+    expect(skill1.enabled).toBe(false);
+    expect(skill1.installs).toBe(150);
+    expect(skill1.trending24h).toBe(10);
+    expect(skill1.tags).toEqual(["pdf", "productivity"]);
+    expect(skill1.featured).toBe(true);
+    expect(skill1.authorName).toBe("John Doe");
+    expect(skill1.telegramLink).toBe("https://t.me/johndoe");
+
+    expect(updateSkillsList).toHaveBeenCalledWith(skills);
+  });
+
+  it("returns empty array when skillsbd API returns error", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({ ok: false, status: 500 });
+    global.fetch = fetchMock as any;
+
+    getEnabledRepositories.mockReturnValue([
+      { id: "skillsbd1", name: "SkillsBD", type: "skillsbd", url: "https://skillsbd.ru", enabled: true }
+    ]);
+
+    const { fetchSkillsFromMarketplace } = await import("../src/agent/libs/skills-loader.ts");
+    const skills = await fetchSkillsFromMarketplace();
+
+    expect(skills).toHaveLength(0);
+  });
+
+  it("returns empty array when skillsbd API returns empty catalog", async () => {
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => []
+    });
+
+    global.fetch = fetchMock as any;
+
+    getEnabledRepositories.mockReturnValue([
+      { id: "skillsbd1", name: "SkillsBD", type: "skillsbd", url: "https://skillsbd.ru", enabled: true }
+    ]);
+
+    const { fetchSkillsFromMarketplace } = await import("../src/agent/libs/skills-loader.ts");
+    const skills = await fetchSkillsFromMarketplace();
+
+    expect(skills).toHaveLength(0);
+  });
+});
+
+describe("downloadSkillFromSkillsbd (via fetchSkillsFromMarketplace)", () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+  });
+
+  it("fetches skillsbd catalog and includes skillsbd-specific fields in skills", async () => {
+    const catalogResponse = [
+      {
+        id: "test-skill",
+        name: "Test Skill",
+        description: "Test description",
+        category: "testing",
+        authorName: "Test Author",
+        owner: "testowner",
+        repo: "testrepo",
+        installs: 100,
+        trending24h: 5,
+        tags: ["test", "demo"],
+        featured: true,
+        telegramLink: "https://t.me/test"
+      }
+    ];
+
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => catalogResponse
+    });
+
+    global.fetch = fetchMock as any;
+
+    getEnabledRepositories.mockReturnValue([
+      { id: "skillsbd1", name: "SkillsBD", type: "skillsbd", url: "https://skillsbd.ru", enabled: true }
+    ]);
+
+    const { fetchSkillsFromMarketplace } = await import("../src/agent/libs/skills-loader.ts");
+    const skills = await fetchSkillsFromMarketplace();
+
+    expect(skills.length).toBe(1);
+    const skill = skills[0];
+    expect(skill.owner).toBe("testowner");
+    expect(skill.repo).toBe("testrepo");
+    expect(skill.repoPath).toBe("testowner/testrepo");
+    expect(skill.installs).toBe(100);
+    expect(skill.tags).toEqual(["test", "demo"]);
+    expect(skill.featured).toBe(true);
+  });
+
+  it("handles skillsbd catalog with trailing slash in URL", async () => {
+    const catalogResponse = [
+      { id: "s1", name: "S1", description: "d", category: "c", authorName: "a", owner: "o", repo: "r", installs: 1, trending24h: 0, tags: [], featured: false, telegramLink: null }
+    ];
+
+    const fetchMock = vi.fn().mockResolvedValueOnce({
+      ok: true,
+      json: async () => catalogResponse
+    });
+
+    global.fetch = fetchMock as any;
+
+    getEnabledRepositories.mockReturnValue([
+      { id: "skillsbd1", name: "SkillsBD", type: "skillsbd", url: "https://skillsbd.ru/", enabled: true }
+    ]);
+
+    const { fetchSkillsFromMarketplace } = await import("../src/agent/libs/skills-loader.ts");
+    await fetchSkillsFromMarketplace();
+
+    expect(fetchMock).toHaveBeenCalledWith("https://skillsbd.ru/api/skills");
+  });
+});
