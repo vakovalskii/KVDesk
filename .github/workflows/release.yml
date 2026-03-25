@@ -90,9 +90,6 @@ jobs:
       - name: Build Tauri
         env:
           APPLE_SIGNING_IDENTITY: "Developer ID Application: Valeriy Kovalsky (A933C2TJXU)"
-          APPLE_ID: ${{ secrets.APPLE_ID }}
-          APPLE_PASSWORD: ${{ secrets.APPLE_PASSWORD }}
-          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
         run: cd src-tauri && cargo tauri build --target ${{ matrix.target }}
 
       - name: Notarize macOS DMG
