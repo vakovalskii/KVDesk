@@ -205,7 +205,7 @@ export type ModelInfo = {
 };
 
 // LLM Provider types
-export type LLMProviderType = 'openai' | 'openrouter' | 'zai' | 'ollama' | 'claude-code';
+export type LLMProviderType = 'openai' | 'openrouter' | 'zai' | 'ollama' | 'claude-code' | 'codex';
 
 export type ZaiApiUrlPrefix = 'default' | 'coding';
 
@@ -216,6 +216,7 @@ export interface LLMProvider {
   apiKey: string;
   baseUrl?: string;
   zaiApiPrefix?: ZaiApiUrlPrefix; // Only for zai provider
+  proxyUrl?: string; // HTTP/HTTPS/SOCKS5 proxy URL
   enabled: boolean;
 }
 
@@ -272,7 +273,12 @@ export type ServerEvent =
   | { type: "scheduler.notification"; payload: { title: string; body: string } }
   | { type: "scheduler.task_execute"; payload: { taskId: string; title: string; prompt?: string } }
   | { type: "scheduler.default_model.loaded"; payload: { modelId: string | null } }
-  | { type: "scheduler.default_temperature.loaded"; payload: { temperature: number; sendTemperature: boolean } };
+  | { type: "scheduler.default_temperature.loaded"; payload: { temperature: number; sendTemperature: boolean } }
+  // OAuth events
+  | { type: "oauth.flow.started"; payload: { authorizeUrl: string; flowId: string } }
+  | { type: "oauth.flow.completed"; payload: { provider: string; email?: string; accountId?: string } }
+  | { type: "oauth.flow.error"; payload: { message: string } }
+  | { type: "oauth.status"; payload: { provider: string; loggedIn: boolean; email?: string; accountId?: string; expiresAt?: string } };
 
 // Client -> Server events
 export type ClientEvent =
@@ -318,4 +324,8 @@ export type ClientEvent =
   | { type: "scheduler.default_model.get" }
   | { type: "scheduler.default_model.set"; payload: { modelId: string } }
   | { type: "scheduler.default_temperature.get" }
-  | { type: "scheduler.default_temperature.set"; payload: { temperature: number; sendTemperature: boolean } };
+  | { type: "scheduler.default_temperature.set"; payload: { temperature: number; sendTemperature: boolean } }
+  // OAuth events
+  | { type: "oauth.login"; payload: { provider: string; method?: 'browser' | 'device_code' | 'token'; token?: string } }
+  | { type: "oauth.logout"; payload: { provider: string } }
+  | { type: "oauth.status.get"; payload: { provider: string } };

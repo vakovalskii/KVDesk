@@ -104,6 +104,23 @@ async function fetchOllamaModels(baseUrl: string): Promise<PartialModel[]> {
   }
 }
 
+// Fetch models for Codex (OpenAI OAuth-based, no manual API key needed)
+// Codex API has no /models endpoint — models depend on user's subscription
+async function fetchCodexModels(): Promise<PartialModel[]> {
+  return [
+    {
+      id: 'gpt-5.3-codex',
+      name: 'GPT-5.3 Codex',
+      description: 'Codex model (OpenAI Plus/Pro subscription)',
+    },
+    {
+      id: 'gpt-5.4',
+      name: 'GPT-5.4',
+      description: 'Latest GPT model (OpenAI Plus/Pro subscription)',
+    },
+  ];
+}
+
 // Fetch models for Claude Code (subscription-based, no API key needed)
 async function fetchClaudeCodeModels(): Promise<PartialModel[]> {
   // Claude Code subscription provides access to Claude models via the SDK
@@ -195,6 +212,10 @@ export async function fetchModelsFromProvider(provider: LLMProvider): Promise<LL
       fetchedModels = await fetchClaudeCodeModels();
       break;
 
+    case 'codex':
+      fetchedModels = await fetchCodexModels();
+      break;
+
     default:
       throw new Error(`Unsupported provider type: ${provider.type}`);
   }
@@ -269,8 +290,8 @@ export function validateProvider(provider: Partial<LLMProvider>): { valid: boole
     return { valid: false, error: 'Provider name is required' };
   }
 
-  // Claude Code and Ollama don't need API keys
-  if (provider.type !== 'claude-code' && provider.type !== 'ollama') {
+  // Claude Code, Ollama, and Codex don't need manual API keys
+  if (provider.type !== 'claude-code' && provider.type !== 'ollama' && provider.type !== 'codex') {
     if (!provider.apiKey || provider.apiKey.trim() === '') {
       return { valid: false, error: 'API key is required' };
     }

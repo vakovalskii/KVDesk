@@ -18,6 +18,7 @@ import { loadLLMProviderSettings, saveLLMProviderSettings } from "./libs/llm-pro
 import { fetchModelsFromProvider, checkModelsAvailability, validateProvider, createProvider } from "./libs/llm-providers.js";
 import { loadSkillsSettings, saveSkillsSettings, toggleSkill, setMarketplaceUrl, addRepository, updateRepository, removeRepository, toggleRepository } from "./libs/skills-store.js";
 import { fetchSkillsFromMarketplace } from "./libs/skills-loader.js";
+import { openAIOAuthConfig, startBrowserOAuthFlow, stopOAuthFlow, getCredential, setCredential, deleteCredential, isExpired, readCodexCliCredentials } from "./libs/auth/index.js";
 
 const DB_PATH = join(app.getPath("userData"), "sessions.db");
 const sessions = new SessionStore(DB_PATH);
@@ -1693,6 +1694,101 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
         skills: settings.skills,
         repositories: settings.repositories,
         lastFetched: settings.lastFetched
+      }
+    });
+    return;
+  }
+
+  // OAuth handlers
+  if (event.type === "oauth.login") {
+    const { provider, method, token } = event.payload;
+
+    if (method === 'token' && token) {
+      // Direct token input
+      setCredential(provider, {
+        accessToken: token,
+        provider,
+        authMethod: 'token',
+      });
+      sessionManager.emitToWindow(windowId, {
+        type: "oauth.flow.completed",
+        payload: { provider }
+      });
+      return;
+    }
+
+    // Browser OAuth flow
+    try {
+      const cfg = openAIOAuthConfig();
+      const { authorizeUrl, flowId } = startBrowserOAuthFlow(cfg);
+
+      sessionManager.emitToWindow(windowId, {
+        type: "oauth.flow.started",
+        payload: { authorizeUrl, flowId }
+      });
+
+      // Open browser
+      shell.openExternal(authorizeUrl);
+
+      // Poll for completion
+      const pollInterval = setInterval(() => {
+        const cred = getCredential('openai');
+        if (cred) {
+          clearInterval(pollInterval);
+          sessionManager.emitToWindow(windowId, {
+            type: "oauth.flow.completed",
+            payload: { provider, email: cred.email, accountId: cred.accountId }
+          });
+        }
+      }, 1000);
+
+      // Timeout after 5 minutes
+      setTimeout(() => {
+        clearInterval(pollInterval);
+        stopOAuthFlow();
+      }, 5 * 60 * 1000);
+    } catch (error) {
+      console.error('[OAuth] Login error:', error);
+      sessionManager.emitToWindow(windowId, {
+        type: "oauth.flow.error",
+        payload: { message: String(error) }
+      });
+    }
+    return;
+  }
+
+  if (event.type === "oauth.logout") {
+    const { provider } = event.payload;
+    deleteCredential(provider);
+    sessionManager.emitToWindow(windowId, {
+      type: "oauth.status",
+      payload: { provider, loggedIn: false }
+    });
+    return;
+  }
+
+  if (event.type === "oauth.status.get") {
+    const { provider } = event.payload;
+    let cred = getCredential(provider);
+
+    // Auto-import from Codex CLI if no ValeDesk credentials
+    if (!cred && provider === 'openai') {
+      const codexCred = readCodexCliCredentials();
+      if (codexCred) {
+        setCredential('openai', codexCred);
+        cred = codexCred;
+        console.log('[OAuth] Auto-imported credentials from Codex CLI (~/.codex/auth.json)');
+      }
+    }
+
+    sessionManager.emitToWindow(windowId, {
+      type: "oauth.status",
+      payload: {
+        provider,
+        loggedIn: !!cred && !isExpired(cred),
+        email: cred?.email,
+        accountId: cred?.accountId,
+        expiresAt: cred?.expiresAt,
       }
     });
     return;

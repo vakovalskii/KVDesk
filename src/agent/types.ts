@@ -50,7 +50,7 @@ export type ModelInfo = {
 };
 
 // LLM Provider types
-export type LLMProviderType = 'openai' | 'openrouter' | 'zai' | 'ollama' | 'claude-code';
+export type LLMProviderType = 'openai' | 'openrouter' | 'zai' | 'ollama' | 'claude-code' | 'codex';
 
 export type ZaiApiUrlPrefix = 'default' | 'coding';
 
@@ -61,6 +61,7 @@ export interface LLMProvider {
   apiKey: string;
   baseUrl?: string;
   zaiApiPrefix?: ZaiApiUrlPrefix; // Only for zai provider
+  proxyUrl?: string; // HTTP/HTTPS/SOCKS5 proxy URL
   enabled: boolean;
 }
 
@@ -180,7 +181,12 @@ export type ServerEvent =
   | { type: "skills.loaded"; payload: { skills: Skill[]; repositories: SkillRepository[]; lastFetched?: number } }
   | { type: "skills.error"; payload: { message: string } }
   // Scheduler IPC (sidecar -> Rust)
-  | { type: "scheduler.request"; payload: { requestId: string; operation: string; params: Record<string, any> } };
+  | { type: "scheduler.request"; payload: { requestId: string; operation: string; params: Record<string, any> } }
+  // OAuth events
+  | { type: "oauth.flow.started"; payload: { authorizeUrl: string; flowId: string } }
+  | { type: "oauth.flow.completed"; payload: { provider: string; email?: string; accountId?: string } }
+  | { type: "oauth.flow.error"; payload: { message: string } }
+  | { type: "oauth.status"; payload: { provider: string; loggedIn: boolean; email?: string; accountId?: string; expiresAt?: string } };
 
 // Skill types
 export type SkillRepositoryType = "github" | "local" | "http" | "skillsbd";
@@ -305,4 +311,8 @@ export type ClientEvent =
   | { type: "skills.add-repository"; payload: { repo: Omit<SkillRepository, "id"> } }
   | { type: "skills.update-repository"; payload: { id: string; updates: Partial<Omit<SkillRepository, "id">> } }
   | { type: "skills.remove-repository"; payload: { id: string } }
-  | { type: "skills.toggle-repository"; payload: { id: string; enabled: boolean } };
+  | { type: "skills.toggle-repository"; payload: { id: string; enabled: boolean } }
+  // OAuth events
+  | { type: "oauth.login"; payload: { provider: string; method?: 'browser' | 'device_code' | 'token'; token?: string } }
+  | { type: "oauth.logout"; payload: { provider: string } }
+  | { type: "oauth.status.get"; payload: { provider: string } };

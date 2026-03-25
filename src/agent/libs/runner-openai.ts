@@ -9,6 +9,8 @@ import type { ServerEvent } from "../types.js";
 import type { Session } from "./session-store.js";
 import { loadApiSettings } from "./settings-store.js";
 import { loadLLMProviderSettings } from "./llm-providers-store.js";
+import { createCodexTokenSource } from "./auth/index.js";
+import { createProxyFetch } from "./auth/proxy-fetch.js";
 import { TOOLS, getTools, generateToolsSummary } from "./tools-definitions.js";
 import { getInitialPrompt, getSystemPrompt } from "./prompt-loader.js";
 import { getTodosSummary, getTodos, setTodos, clearTodos } from "./tools/manage-todos-tool.js";
@@ -229,7 +231,16 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         apiKey = provider.apiKey;
         
         // Determine base URL based on provider type
-        if (provider.type === 'openrouter') {
+        if (provider.type === 'codex') {
+          baseURL = 'https://chatgpt.com/backend-api/codex';
+          // Load OAuth credentials for Codex
+          const tokenSource = createCodexTokenSource();
+          const codexCreds = await tokenSource();
+          apiKey = codexCreds.accessToken;
+          // Store accountId for headers (used in customFetch below)
+          (session as any)._codexAccountId = codexCreds.accountId;
+          (session as any)._codexProvider = true;
+        } else if (provider.type === 'openrouter') {
           baseURL = 'https://openrouter.ai/api/v1';
         } else if (provider.type === 'zai') {
           const prefix = provider.zaiApiPrefix === 'coding' ? 'api/coding/paas' : 'api/paas';
@@ -243,6 +254,11 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         modelName = modelId;
         temperature = session.temperature; // undefined means don't send
         providerInfo = `${provider.name} (${provider.type})`;
+
+        // Store proxy URL for customFetch
+        if (provider.proxyUrl) {
+          (session as any)._proxyUrl = provider.proxyUrl;
+        }
       } else {
         // Use legacy API settings (apiKey/baseURL from file; model from session or file)
         const guiSettings = loadApiSettings();
@@ -290,7 +306,14 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
 
           if (resolvedProvider && resolvedModelId) {
             apiKey = resolvedProvider.apiKey;
-            if (resolvedProvider.type === 'openrouter') {
+            if (resolvedProvider.type === 'codex') {
+              baseURL = 'https://chatgpt.com/backend-api/codex';
+              const tokenSource = createCodexTokenSource();
+              const codexCreds = await tokenSource();
+              apiKey = codexCreds.accessToken;
+              (session as any)._codexAccountId = codexCreds.accountId;
+              (session as any)._codexProvider = true;
+            } else if (resolvedProvider.type === 'openrouter') {
               baseURL = 'https://openrouter.ai/api/v1';
             } else if (resolvedProvider.type === 'zai') {
               const prefix = resolvedProvider.zaiApiPrefix === 'coding' ? 'api/coding/paas' : 'api/paas';
@@ -299,6 +322,9 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
               baseURL = resolvedProvider.baseUrl || 'http://localhost:11434/v1';
             } else {
               baseURL = resolvedProvider.baseUrl || '';
+            }
+            if (resolvedProvider.proxyUrl) {
+              (session as any)._proxyUrl = resolvedProvider.proxyUrl;
             }
             modelName = resolvedModelId;
             temperature = session.temperature;
@@ -322,8 +348,23 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
       const guiSettings = loadApiSettings();
 
       // Custom fetch to capture error response bodies
-      const originalFetch = global.fetch;
+      // Use proxy-aware fetch if proxy is configured
+      const proxyUrl = (session as any)._proxyUrl as string | undefined;
+      const baseFetch = createProxyFetch(proxyUrl);
+      const originalFetch = baseFetch;
       const customFetch = async (url: any, options: any) => {
+        // Add Codex-specific headers if this is a Codex provider session
+        if ((session as any)._codexProvider && options?.headers) {
+          const headers = options.headers instanceof Headers
+            ? options.headers
+            : new Headers(options.headers);
+          headers.set('originator', 'codex_cli_rs');
+          headers.set('OpenAI-Beta', 'responses=experimental');
+          if ((session as any)._codexAccountId) {
+            headers.set('Chatgpt-Account-Id', (session as any)._codexAccountId);
+          }
+          options.headers = headers;
+        }
         const response = await originalFetch(url, options);
         
         // Clone response to read body for errors
@@ -658,6 +699,8 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
         };
         logTurn(session.id, iterationCount, 'request', requestPayload);
 
+        const isCodex = !!(session as any)._codexProvider;
+
         const runStreamWithRetries = async () => {
           let lastError: unknown;
 
@@ -669,9 +712,133 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
 
             try {
               if (debug) {
-                const reqUrl = `${baseURL.replace(/\/$/, '')}/chat/completions`;
-                console.error('[OpenAI Runner] Debug: request model=%s url=%s', modelName, reqUrl);
+                const apiPath = isCodex ? '/responses' : '/chat/completions';
+                const reqUrl = `${baseURL.replace(/\/$/, '')}${apiPath}`;
+                console.error('[OpenAI Runner] Debug: request model=%s url=%s codex=%s', modelName, reqUrl, isCodex);
               }
+
+              if (isCodex) {
+                // ── Codex: Responses API ──
+                // Extract system/instructions and convert messages to Responses API input
+                let codexInstructions = 'You are Codex, a coding assistant.';
+                const responsesInput: any[] = [];
+
+                for (const msg of messages as any[]) {
+                  if (msg.role === 'system') {
+                    // System messages become the instructions field (not part of input)
+                    codexInstructions = msg.content;
+                  } else if (msg.role === 'user') {
+                    responsesInput.push({ role: 'user', content: msg.content });
+                  } else if (msg.role === 'assistant') {
+                    if (msg.tool_calls) {
+                      for (const tc of msg.tool_calls) {
+                        responsesInput.push({
+                          type: 'function_call',
+                          call_id: tc.id,
+                          name: tc.function.name,
+                          arguments: tc.function.arguments,
+                        });
+                      }
+                      // Also add text output if present
+                      if (msg.content) {
+                        responsesInput.push({ role: 'assistant', content: msg.content });
+                      }
+                    } else {
+                      responsesInput.push({ role: 'assistant', content: msg.content || '' });
+                    }
+                  } else if (msg.role === 'tool') {
+                    responsesInput.push({
+                      type: 'function_call_output',
+                      call_id: msg.tool_call_id,
+                      output: typeof msg.content === 'string' ? msg.content : JSON.stringify(msg.content),
+                    });
+                  }
+                }
+
+                // Convert tools to Responses API format
+                const responsesTools = (activeTools as any[]).map((t: any) => ({
+                  type: 'function' as const,
+                  name: t.function.name,
+                  description: t.function.description,
+                  parameters: t.function.parameters,
+                  strict: false,
+                }));
+
+                const stream = await client.responses.create({
+                  model: modelName,
+                  instructions: codexInstructions,
+                  input: responsesInput,
+                  tools: responsesTools as any,
+                  store: false,
+                  stream: true,
+                } as any, { signal: abortController.signal });
+
+                // Process Responses API stream events
+                for await (const event of stream as any) {
+                  if (aborted) break;
+
+                  if (event.type === 'response.created' || event.type === 'response.in_progress') {
+                    if (event.response?.id) {
+                      streamMetadata.id = event.response.id;
+                      streamMetadata.model = event.response.model;
+                    }
+                  }
+
+                  if (event.type === 'response.output_text.delta') {
+                    if (!contentStarted) {
+                      contentStarted = true;
+                      sendMessage('stream_event', {
+                        event: { type: 'content_block_start', content_block: { type: 'text', text: '' }, index: 0 }
+                      });
+                    }
+                    assistantMessage += event.delta || '';
+                    sendMessage('stream_event', {
+                      event: { type: 'content_block_delta', delta: { type: 'text_delta', text: event.delta || '' }, index: 0 }
+                    });
+                  }
+
+                  if (event.type === 'response.function_call_arguments.delta') {
+                    const idx = toolCalls.findIndex((tc: any) => tc.id === event.item_id);
+                    if (idx >= 0) {
+                      toolCalls[idx].function.arguments += event.delta || '';
+                    }
+                  }
+
+                  if (event.type === 'response.output_item.added' && event.item?.type === 'function_call') {
+                    toolCalls.push({
+                      id: event.item.call_id || event.item.id || `call_${Date.now()}`,
+                      type: 'function',
+                      function: {
+                        name: event.item.name || '',
+                        arguments: event.item.arguments || '',
+                      }
+                    });
+                  }
+
+                  if (event.type === 'response.completed') {
+                    streamMetadata.finishReason = event.response?.status === 'completed' ? 'stop' : 'tool_calls';
+                    if (event.response?.usage) {
+                      streamMetadata.usage = {
+                        prompt_tokens: event.response.usage.input_tokens,
+                        completion_tokens: event.response.usage.output_tokens,
+                      };
+                    }
+                  }
+                }
+
+                if (contentStarted) {
+                  sendMessage('stream_event', { event: { type: 'content_block_stop', index: 0 } });
+                }
+
+                // If we got function calls but finishReason wasn't set
+                if (toolCalls.length > 0 && !streamMetadata.finishReason) {
+                  streamMetadata.finishReason = 'tool_calls';
+                }
+
+                return { assistantMessage, toolCalls, streamMetadata };
+              }
+
+              // ── Standard: Chat Completions API ──
               const stream = await client.chat.completions.create({
                 model: modelName,
                 messages: messages as any[],

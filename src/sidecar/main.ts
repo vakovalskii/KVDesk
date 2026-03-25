@@ -15,6 +15,8 @@ import { loadSkillsSettings, toggleSkill, setMarketplaceUrl, addRepository, upda
 import { fetchSkillsFromMarketplace } from "../agent/libs/skills-loader.js";
 import { webCache } from "../agent/libs/web-cache.js";
 import * as gitUtils from "../agent/git-utils.js";
+import { openAIOAuthConfig, startBrowserOAuthFlow, stopOAuthFlow, getCredential, setCredential, deleteCredential, isExpired, readCodexCliCredentials } from "../agent/libs/auth/index.js";
+import { exec } from "node:child_process";
 
 type RunnerHandle = {
   abort: () => void;
@@ -1071,6 +1073,82 @@ function handleFileChangesRollback(event: Extract<ClientEvent, { type: "file_cha
   emit({ type: "file_changes.rolledback", payload: { sessionId, fileChanges: remainingChanges } } as any);
 }
 
+// OAuth handlers
+function handleOAuthLogin(event: any) {
+  const { provider, method, token } = event.payload;
+
+  if (method === 'token' && token) {
+    setCredential(provider, {
+      accessToken: token,
+      provider,
+      authMethod: 'token',
+    });
+    emit({ type: "oauth.flow.completed", payload: { provider } } as any);
+    return;
+  }
+
+  // Browser OAuth flow
+  try {
+    const cfg = openAIOAuthConfig();
+    const { authorizeUrl, flowId } = startBrowserOAuthFlow(cfg);
+
+    emit({ type: "oauth.flow.started", payload: { authorizeUrl, flowId } } as any);
+
+    // Open browser (cross-platform)
+    const openCmd = process.platform === 'darwin' ? 'open' :
+                    process.platform === 'win32' ? 'start' : 'xdg-open';
+    exec(`${openCmd} "${authorizeUrl}"`);
+
+    // Poll for completion
+    const pollInterval = setInterval(() => {
+      const cred = getCredential('openai');
+      if (cred) {
+        clearInterval(pollInterval);
+        emit({ type: "oauth.flow.completed", payload: { provider, email: cred.email, accountId: cred.accountId } } as any);
+      }
+    }, 1000);
+
+    setTimeout(() => {
+      clearInterval(pollInterval);
+      stopOAuthFlow();
+    }, 5 * 60 * 1000);
+  } catch (error) {
+    emit({ type: "oauth.flow.error", payload: { message: String(error) } } as any);
+  }
+}
+
+function handleOAuthLogout(event: any) {
+  const { provider } = event.payload;
+  deleteCredential(provider);
+  emit({ type: "oauth.status", payload: { provider, loggedIn: false } } as any);
+}
+
+function handleOAuthStatusGet(event: any) {
+  const { provider } = event.payload;
+  let cred = getCredential(provider);
+
+  // Auto-import from Codex CLI if no ValeDesk credentials
+  if (!cred && provider === 'openai') {
+    const codexCred = readCodexCliCredentials();
+    if (codexCred) {
+      setCredential('openai', codexCred);
+      cred = codexCred;
+      writeOut({ type: "log", level: "info", message: "Auto-imported credentials from Codex CLI (~/.codex/auth.json)" });
+    }
+  }
+
+  emit({
+    type: "oauth.status",
+    payload: {
+      provider,
+      loggedIn: !!cred && !isExpired(cred),
+      email: cred?.email,
+      accountId: cred?.accountId,
+      expiresAt: cred?.expiresAt,
+    }
+  } as any);
+}
+
 function handleLlmProvidersGet() {
   const settings = loadLLMProviderSettings();
   emit({ type: "llm.providers.loaded", payload: { settings: settings || { providers: [], models: [] } } } as any);
@@ -1314,6 +1392,15 @@ async function handleClientEvent(event: ClientEvent) {
       return;
     case "skills.toggle-repository":
       handleSkillsToggleRepository(event);
+      return;
+    case "oauth.login":
+      handleOAuthLogin(event);
+      return;
+    case "oauth.logout":
+      handleOAuthLogout(event);
+      return;
+    case "oauth.status.get":
+      handleOAuthStatusGet(event);
       return;
     case "session.compact": {
       const { sessionId, sessionData, messages: historyMessages, llmProviderSettings, apiSettings } = (event as any).payload;

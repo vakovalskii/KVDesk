@@ -36,11 +36,15 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
     if (activeSessionId && !trimmedPrompt) return;
 
     if (!activeSessionId) {
-      // Resolve selected model id to API model name (for scheduler default and session.start)
+      // For LLM provider models (containing ::), pass the full id so the runner
+      // can identify the provider. For legacy models, resolve to API name.
       const state = useAppStore.getState();
-      const apiModelName = state.llmModels?.find(m => m.id === selectedModel)?.name
-        ?? state.availableModels?.find(m => m.id === selectedModel)?.name
-        ?? selectedModel;
+      const isProviderModel = selectedModel?.includes('::');
+      const apiModelName = isProviderModel
+        ? selectedModel
+        : (state.llmModels?.find(m => m.id === selectedModel)?.name
+          ?? state.availableModels?.find(m => m.id === selectedModel)?.name
+          ?? selectedModel);
 
       setPendingStart(true);
       
@@ -61,11 +65,11 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
           temperature: sendTemperature ? selectedTemperature : undefined
         }
       });
-      // Save API model name as default for future sessions (API expects name, not internal id)
+      // Save selected model as default for future sessions
       if (selectedModel) {
         sendEvent({
           type: "scheduler.default_model.set",
-          payload: { modelId: apiModelName }
+          payload: { modelId: isProviderModel ? selectedModel : (apiModelName || selectedModel) }
         } as ClientEvent);
       }
       // Save temperature as default for future sessions

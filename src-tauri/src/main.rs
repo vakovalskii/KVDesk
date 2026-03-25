@@ -1722,7 +1722,8 @@ fn client_event(app: tauri::AppHandle, state: tauri::State<'_, AppState>, event:
 
     // Forward other LLM-related events to sidecar
     "models.get" | "llm.models.test" | "llm.models.fetch" | "llm.models.check" |
-    "skills.get" | "skills.refresh" | "skills.toggle" | "skills.set-marketplace" => {
+    "skills.get" | "skills.refresh" | "skills.toggle" | "skills.set-marketplace" |
+    "oauth.login" | "oauth.logout" | "oauth.status.get" => {
       send_to_sidecar(app, state.inner(), &event)
     }
 
