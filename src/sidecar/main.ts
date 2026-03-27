@@ -1135,10 +1135,16 @@ function handleOAuthLogin(event: any) {
 
     emit({ type: "oauth.flow.started", payload: { authorizeUrl, flowId } } as any);
 
-    // Open browser (cross-platform)
-    const openCmd = process.platform === 'darwin' ? 'open' :
-                    process.platform === 'win32' ? 'start' : 'xdg-open';
-    exec(`${openCmd} "${authorizeUrl}"`);
+    // Open browser — emit event for Rust/Tauri to handle, with exec fallback
+    emit({ type: "open.external" as any, payload: { url: authorizeUrl } } as any);
+    // Fallback: also try direct open in case event isn't handled
+    if (process.platform === 'win32') {
+      exec(`cmd /c start "" "${authorizeUrl}"`);
+    } else if (process.platform === 'darwin') {
+      exec(`open "${authorizeUrl}"`);
+    } else {
+      exec(`xdg-open "${authorizeUrl}"`);
+    }
 
     // Poll for completion
     const pollInterval = setInterval(() => {
