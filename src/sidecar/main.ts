@@ -9,12 +9,15 @@ import { MemorySessionStore } from "./session-store-memory.js";
 import { runClaude as runClaudeSDK } from "../agent/libs/runner.js";
 import { runClaude as runOpenAI } from "../agent/libs/runner-openai.js";
 import { loadApiSettings, saveApiSettings } from "../agent/libs/settings-store.js";
+import { generateSessionTitle } from "../agent/libs/util.js";
 import { loadLLMProviderSettings, saveLLMProviderSettings } from "../agent/libs/llm-providers-store.js";
 import { fetchModelsFromProvider, checkModelsAvailability } from "../agent/libs/llm-providers.js";
-import { loadSkillsSettings, toggleSkill, setMarketplaceUrl } from "../agent/libs/skills-store.js";
+import { loadSkillsSettings, toggleSkill, setMarketplaceUrl, addRepository, updateRepository, removeRepository, toggleRepository } from "../agent/libs/skills-store.js";
 import { fetchSkillsFromMarketplace } from "../agent/libs/skills-loader.js";
 import { webCache } from "../agent/libs/web-cache.js";
 import * as gitUtils from "../agent/git-utils.js";
+import { openAIOAuthConfig, startBrowserOAuthFlow, stopOAuthFlow, getCredential, setCredential, deleteCredential, isExpired, readCodexCliCredentials } from "../agent/libs/auth/index.js";
+import { exec } from "node:child_process";
 
 type RunnerHandle = {
   abort: () => void;
@@ -519,6 +522,25 @@ function handleSessionStart(event: Extract<ClientEvent, { type: "session.start" 
   } as any);
 
   emitAndPersist({ type: "stream.user_prompt", payload: { sessionId: session.id, prompt: event.payload.prompt } } as any);
+
+  // Auto-generate title using the session's LLM model
+  if (session.title === "New Chat" && event.payload.prompt?.trim()) {
+    generateSessionTitle(event.payload.prompt, session.model)
+      .then((newTitle) => {
+        const current = sessions.getSession(session.id);
+        if (current && current.title === "New Chat" && newTitle && newTitle !== "New Chat") {
+          sessions.updateSession(session.id, { title: newTitle });
+          emit({
+            type: "session.status",
+            payload: { sessionId: session.id, status: current.status, title: newTitle, cwd: session.cwd, model: session.model, temperature: session.temperature },
+          } as any);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to generate title for new session:", err);
+      });
+  }
+
   startRunner(session.id, event.payload.prompt);
 }
 
@@ -557,6 +579,8 @@ function handleSessionContinue(event: Extract<ClientEvent, { type: "session.cont
     return;
   }
 
+  const isFirstRun = !session.claudeSessionId;
+
   sessions.updateSession(sessionId, { status: "running", lastPrompt: prompt });
   emit({
     type: "session.status",
@@ -564,6 +588,25 @@ function handleSessionContinue(event: Extract<ClientEvent, { type: "session.cont
   } as any);
 
   emitAndPersist({ type: "stream.user_prompt", payload: { sessionId: session.id, prompt } } as any);
+
+  // Auto-generate title for empty chats on first real prompt
+  if (isFirstRun && session.title === "New Chat" && prompt?.trim()) {
+    generateSessionTitle(prompt, session.model)
+      .then((newTitle) => {
+        const current = sessions.getSession(sessionId);
+        if (current && current.title === "New Chat" && newTitle && newTitle !== "New Chat") {
+          sessions.updateSession(sessionId, { title: newTitle });
+          emit({
+            type: "session.status",
+            payload: { sessionId, status: current.status, title: newTitle, cwd: session.cwd, model: session.model, temperature: session.temperature },
+          } as any);
+        }
+      })
+      .catch((err) => {
+        console.error("Failed to generate title for continued session:", err);
+      });
+  }
+
   startRunner(session.id, prompt);
 }
 
@@ -1071,6 +1114,88 @@ function handleFileChangesRollback(event: Extract<ClientEvent, { type: "file_cha
   emit({ type: "file_changes.rolledback", payload: { sessionId, fileChanges: remainingChanges } } as any);
 }
 
+// OAuth handlers
+function handleOAuthLogin(event: any) {
+  const { provider, method, token } = event.payload;
+
+  if (method === 'token' && token) {
+    setCredential(provider, {
+      accessToken: token,
+      provider,
+      authMethod: 'token',
+    });
+    emit({ type: "oauth.flow.completed", payload: { provider } } as any);
+    return;
+  }
+
+  // Browser OAuth flow
+  try {
+    const cfg = openAIOAuthConfig();
+    const { authorizeUrl, flowId } = startBrowserOAuthFlow(cfg);
+
+    emit({ type: "oauth.flow.started", payload: { authorizeUrl, flowId } } as any);
+
+    // Open browser — emit event for Rust/Tauri to handle, with exec fallback
+    emit({ type: "open.external" as any, payload: { url: authorizeUrl } } as any);
+    // Fallback: also try direct open in case event isn't handled
+    if (process.platform === 'win32') {
+      exec(`cmd /c start "" "${authorizeUrl}"`);
+    } else if (process.platform === 'darwin') {
+      exec(`open "${authorizeUrl}"`);
+    } else {
+      exec(`xdg-open "${authorizeUrl}"`);
+    }
+
+    // Poll for completion
+    const pollInterval = setInterval(() => {
+      const cred = getCredential('openai');
+      if (cred) {
+        clearInterval(pollInterval);
+        emit({ type: "oauth.flow.completed", payload: { provider, email: cred.email, accountId: cred.accountId } } as any);
+      }
+    }, 1000);
+
+    setTimeout(() => {
+      clearInterval(pollInterval);
+      stopOAuthFlow();
+    }, 5 * 60 * 1000);
+  } catch (error) {
+    emit({ type: "oauth.flow.error", payload: { message: String(error) } } as any);
+  }
+}
+
+function handleOAuthLogout(event: any) {
+  const { provider } = event.payload;
+  deleteCredential(provider);
+  emit({ type: "oauth.status", payload: { provider, loggedIn: false } } as any);
+}
+
+function handleOAuthStatusGet(event: any) {
+  const { provider } = event.payload;
+  let cred = getCredential(provider);
+
+  // Auto-import from Codex CLI if no ValeDesk credentials
+  if (!cred && provider === 'openai') {
+    const codexCred = readCodexCliCredentials();
+    if (codexCred) {
+      setCredential('openai', codexCred);
+      cred = codexCred;
+      writeOut({ type: "log", level: "info", message: "Auto-imported credentials from Codex CLI (~/.codex/auth.json)" });
+    }
+  }
+
+  emit({
+    type: "oauth.status",
+    payload: {
+      provider,
+      loggedIn: !!cred && !isExpired(cred),
+      email: cred?.email,
+      accountId: cred?.accountId,
+      expiresAt: cred?.expiresAt,
+    }
+  } as any);
+}
+
 function handleLlmProvidersGet() {
   const settings = loadLLMProviderSettings();
   emit({ type: "llm.providers.loaded", payload: { settings: settings || { providers: [], models: [] } } } as any);
@@ -1151,18 +1276,22 @@ async function handleLlmModelsCheck() {
   emit({ type: "llm.models.checked", payload: { unavailableModels } } as any);
 }
 
-function handleSkillsGet() {
+function emitSkillsLoaded() {
   const settings = loadSkillsSettings();
   emit({
     type: "skills.loaded",
-    payload: { skills: settings.skills, marketplaceUrl: settings.marketplaceUrl, lastFetched: settings.lastFetched },
+    payload: { skills: settings.skills, repositories: settings.repositories, lastFetched: settings.lastFetched },
   } as any);
+}
+
+function handleSkillsGet() {
+  emitSkillsLoaded();
 }
 
 function handleSkillsRefresh() {
   fetchSkillsFromMarketplace()
     .then(() => {
-      handleSkillsGet();
+      emitSkillsLoaded();
     })
     .catch((error) => {
       emit({ type: "skills.error", payload: { message: String(error) } } as any);
@@ -1172,11 +1301,39 @@ function handleSkillsRefresh() {
 function handleSkillsToggle(event: Extract<ClientEvent, { type: "skills.toggle" }>) {
   const { skillId, enabled } = event.payload as any;
   toggleSkill(skillId, enabled);
+  emitSkillsLoaded();
 }
 
 function handleSkillsSetMarketplace(event: Extract<ClientEvent, { type: "skills.set-marketplace" }>) {
   const { url } = event.payload as any;
   setMarketplaceUrl(url);
+}
+
+function handleSkillsAddRepository(event: Extract<ClientEvent, { type: "skills.add-repository" }>) {
+  addRepository((event.payload as any).repo);
+  fetchSkillsFromMarketplace()
+    .then(() => emitSkillsLoaded())
+    .catch((error) => {
+      emit({ type: "skills.error", payload: { message: String(error) } } as any);
+    });
+}
+
+function handleSkillsUpdateRepository(event: Extract<ClientEvent, { type: "skills.update-repository" }>) {
+  const { id, updates } = event.payload as any;
+  updateRepository(id, updates);
+  emitSkillsLoaded();
+}
+
+function handleSkillsRemoveRepository(event: Extract<ClientEvent, { type: "skills.remove-repository" }>) {
+  const { id } = event.payload as any;
+  removeRepository(id);
+  emitSkillsLoaded();
+}
+
+function handleSkillsToggleRepository(event: Extract<ClientEvent, { type: "skills.toggle-repository" }>) {
+  const { id, enabled } = event.payload as any;
+  toggleRepository(id, enabled);
+  emitSkillsLoaded();
 }
 
 async function handleClientEvent(event: ClientEvent) {
@@ -1270,6 +1427,27 @@ async function handleClientEvent(event: ClientEvent) {
       return;
     case "skills.set-marketplace":
       handleSkillsSetMarketplace(event);
+      return;
+    case "skills.add-repository":
+      handleSkillsAddRepository(event);
+      return;
+    case "skills.update-repository":
+      handleSkillsUpdateRepository(event);
+      return;
+    case "skills.remove-repository":
+      handleSkillsRemoveRepository(event);
+      return;
+    case "skills.toggle-repository":
+      handleSkillsToggleRepository(event);
+      return;
+    case "oauth.login":
+      handleOAuthLogin(event);
+      return;
+    case "oauth.logout":
+      handleOAuthLogout(event);
+      return;
+    case "oauth.status.get":
+      handleOAuthStatusGet(event);
       return;
     case "session.compact": {
       const { sessionId, sessionData, messages: historyMessages, llmProviderSettings, apiSettings } = (event as any).payload;

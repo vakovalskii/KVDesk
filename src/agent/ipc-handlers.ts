@@ -20,7 +20,7 @@ import type { CreateTaskPayload, ThreadTask } from "./types.js";
 import { webCache } from "./libs/web-cache.js";
 import { loadLLMProviderSettings, saveLLMProviderSettings } from "./libs/llm-providers-store.js";
 import { fetchModelsFromProvider, checkModelsAvailability, validateProvider, createProvider } from "./libs/llm-providers.js";
-import { loadSkillsSettings, saveSkillsSettings, toggleSkill, setMarketplaceUrl } from "./libs/skills-store.js";
+import { loadSkillsSettings, saveSkillsSettings, toggleSkill, setMarketplaceUrl, addRepository, updateRepository, removeRepository, toggleRepository } from "./libs/skills-store.js";
 import { fetchSkillsFromMarketplace } from "./libs/skills-loader.js";
 import {
   MiniWorkflowStore,
@@ -48,6 +48,7 @@ import {
   type DistillUsage,
   type VerifyResult,
 } from "./libs/distill-service.js";
+import { openAIOAuthConfig, startBrowserOAuthFlow, stopOAuthFlow, getCredential, setCredential, deleteCredential, isExpired, readCodexCliCredentials } from "./libs/auth/index.js";
 
 const DB_PATH = join(app.getPath("userData"), "sessions.db");
 const sessions = new SessionStore(DB_PATH);
@@ -1111,6 +1112,24 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
       payload: { sessionId: session.id, prompt: event.payload.prompt }
     });
 
+    // Auto-generate title using the session's LLM model
+    if (session.title === "New Chat" && event.payload.prompt?.trim()) {
+      generateSessionTitle(event.payload.prompt, session.model)
+        .then((newTitle) => {
+          const current = sessions.getSession(session.id);
+          if (current && current.title === "New Chat" && newTitle && newTitle !== "New Chat") {
+            sessions.updateSession(session.id, { title: newTitle });
+            sessionManager.emitToWindow(windowId, {
+              type: "session.status",
+              payload: { sessionId: session.id, status: current.status, title: newTitle, cwd: session.cwd, model: session.model }
+            });
+          }
+        })
+        .catch((err) => {
+          console.error('Failed to generate title for new session:', err);
+        });
+    }
+
     selectRunner(session.model)({
       prompt: event.payload.prompt,
       session,
@@ -1161,14 +1180,15 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
     // Generate title for empty chats on first real prompt
     let sessionTitle = session.title;
     if (isFirstRun && session.title === "New Chat" && event.payload.prompt) {
-      // Generate title asynchronously but don't block
-      generateSessionTitle(event.payload.prompt)
+      // Generate title asynchronously using the session's model
+      generateSessionTitle(event.payload.prompt, session.model)
         .then((newTitle) => {
-          if (newTitle && newTitle !== "New Chat") {
+          const current = sessions.getSession(session.id);
+          if (current && current.title === "New Chat" && newTitle && newTitle !== "New Chat") {
             sessions.updateSession(session.id, { title: newTitle });
             emit({
               type: "session.status",
-              payload: { sessionId: session.id, status: session.status, title: newTitle, cwd: session.cwd, model: session.model }
+              payload: { sessionId: session.id, status: current.status, title: newTitle, cwd: session.cwd, model: session.model }
             });
           }
         })
@@ -2110,7 +2130,7 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
       type: "skills.loaded",
       payload: {
         skills: settings.skills,
-        marketplaceUrl: settings.marketplaceUrl,
+        repositories: settings.repositories,
         lastFetched: settings.lastFetched
       }
     });
@@ -2119,13 +2139,13 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
 
   if (event.type === "skills.refresh") {
     fetchSkillsFromMarketplace()
-      .then(skills => {
+      .then(_skills => {
         const settings = loadSkillsSettings();
         sessionManager.emitToWindow(windowId, {
           type: "skills.loaded",
           payload: {
             skills: settings.skills,
-            marketplaceUrl: settings.marketplaceUrl,
+            repositories: settings.repositories,
             lastFetched: settings.lastFetched
           }
         });
@@ -2143,12 +2163,59 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
   if (event.type === "skills.toggle") {
     const { skillId, enabled } = event.payload;
     toggleSkill(skillId, enabled);
+    const settings = loadSkillsSettings();
+    sessionManager.emitToWindow(windowId, {
+      type: "skills.loaded",
+      payload: {
+        skills: settings.skills,
+        repositories: settings.repositories,
+        lastFetched: settings.lastFetched
+      }
+    });
     return;
   }
 
   if (event.type === "skills.set-marketplace") {
     const { url } = event.payload;
     setMarketplaceUrl(url);
+    return;
+  }
+
+  if (event.type === "skills.add-repository") {
+    addRepository(event.payload.repo);
+    fetchSkillsFromMarketplace()
+      .then(_skills => {
+        const settings = loadSkillsSettings();
+        sessionManager.emitToWindow(windowId, {
+          type: "skills.loaded",
+          payload: {
+            skills: settings.skills,
+            repositories: settings.repositories,
+            lastFetched: settings.lastFetched
+          }
+        });
+      })
+      .catch(error => {
+        sessionManager.emitToWindow(windowId, {
+          type: "skills.error",
+          payload: { message: String(error) }
+        });
+      });
+    return;
+  }
+
+  if (event.type === "skills.update-repository") {
+    const { id, updates } = event.payload;
+    updateRepository(id, updates);
+    const settings = loadSkillsSettings();
+    sessionManager.emitToWindow(windowId, {
+      type: "skills.loaded",
+      payload: {
+        skills: settings.skills,
+        repositories: settings.repositories,
+        lastFetched: settings.lastFetched
+      }
+    });
     return;
   }
 
@@ -2529,6 +2596,21 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
     broadcast({
       type: "miniworkflow.list",
       payload: { workflows }
+    });
+    return;
+  }
+
+  if (event.type === "skills.remove-repository") {
+    const { id } = event.payload;
+    removeRepository(id);
+    const settings = loadSkillsSettings();
+    sessionManager.emitToWindow(windowId, {
+      type: "skills.loaded",
+      payload: {
+        skills: settings.skills,
+        repositories: settings.repositories,
+        lastFetched: settings.lastFetched
+      }
     });
     return;
   }
@@ -2959,6 +3041,116 @@ ${sourceCtx}
     })();
 
     // NOTE: miniworkflow.replay.started already emitted earlier (before scripts)
+    return;
+  }
+
+  if (event.type === "skills.toggle-repository") {
+    const { id, enabled } = event.payload;
+    toggleRepository(id, enabled);
+    const settings = loadSkillsSettings();
+    sessionManager.emitToWindow(windowId, {
+      type: "skills.loaded",
+      payload: {
+        skills: settings.skills,
+        repositories: settings.repositories,
+        lastFetched: settings.lastFetched
+      }
+    });
+    return;
+  }
+
+  // OAuth handlers
+  if (event.type === "oauth.login") {
+    const { provider, method, token } = event.payload;
+
+    if (method === 'token' && token) {
+      // Direct token input
+      setCredential(provider, {
+        accessToken: token,
+        provider,
+        authMethod: 'token',
+      });
+      sessionManager.emitToWindow(windowId, {
+        type: "oauth.flow.completed",
+        payload: { provider }
+      });
+      return;
+    }
+
+    // Browser OAuth flow
+    try {
+      const cfg = openAIOAuthConfig();
+      const { authorizeUrl, flowId } = startBrowserOAuthFlow(cfg);
+
+      sessionManager.emitToWindow(windowId, {
+        type: "oauth.flow.started",
+        payload: { authorizeUrl, flowId }
+      });
+
+      // Open browser
+      shell.openExternal(authorizeUrl);
+
+      // Poll for completion
+      const pollInterval = setInterval(() => {
+        const cred = getCredential('openai');
+        if (cred) {
+          clearInterval(pollInterval);
+          sessionManager.emitToWindow(windowId, {
+            type: "oauth.flow.completed",
+            payload: { provider, email: cred.email, accountId: cred.accountId }
+          });
+        }
+      }, 1000);
+
+      // Timeout after 5 minutes
+      setTimeout(() => {
+        clearInterval(pollInterval);
+        stopOAuthFlow();
+      }, 5 * 60 * 1000);
+    } catch (error) {
+      console.error('[OAuth] Login error:', error);
+      sessionManager.emitToWindow(windowId, {
+        type: "oauth.flow.error",
+        payload: { message: String(error) }
+      });
+    }
+    return;
+  }
+
+  if (event.type === "oauth.logout") {
+    const { provider } = event.payload;
+    deleteCredential(provider);
+    sessionManager.emitToWindow(windowId, {
+      type: "oauth.status",
+      payload: { provider, loggedIn: false }
+    });
+    return;
+  }
+
+  if (event.type === "oauth.status.get") {
+    const { provider } = event.payload;
+    let cred = getCredential(provider);
+
+    // Auto-import from Codex CLI if no ValeDesk credentials
+    if (!cred && provider === 'openai') {
+      const codexCred = readCodexCliCredentials();
+      if (codexCred) {
+        setCredential('openai', codexCred);
+        cred = codexCred;
+        console.log('[OAuth] Auto-imported credentials from Codex CLI (~/.codex/auth.json)');
+      }
+    }
+
+    sessionManager.emitToWindow(windowId, {
+      type: "oauth.status",
+      payload: {
+        provider,
+        loggedIn: !!cred && !isExpired(cred),
+        email: cred?.email,
+        accountId: cred?.accountId,
+        expiresAt: cred?.expiresAt,
+      }
+    });
     return;
   }
 }

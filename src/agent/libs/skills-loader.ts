@@ -1,7 +1,15 @@
 import * as fs from "fs";
 import * as path from "path";
 import { homedir } from "os";
-import { Skill, SkillMetadata, loadSkillsSettings, updateSkillsList } from "./skills-store.js";
+import {
+  Skill,
+  SkillMetadata,
+  SkillRepository,
+  loadSkillsSettings,
+  updateSkillsList,
+  getEnabledRepositories,
+  findSkill
+} from "./skills-store.js";
 
 const WORKSPACE_DIR = ".valedesk";
 const SKILLS_SUBDIR = "skills";
@@ -109,96 +117,282 @@ function parseSkillMd(content: string): SkillMetadata | null {
   return metadata.name && metadata.description ? metadata : null;
 }
 
-/**
- * Extract owner/repo from GitHub API URL
- * e.g., "https://api.github.com/repos/owner/repo/contents/skills" -> { owner: "owner", repo: "repo" }
- */
-function parseGitHubUrl(url: string): { owner: string; repo: string } | null {
-  const match = url.match(/api\.github\.com\/repos\/([^/]+)\/([^/]+)/);
-  if (match) {
-    return { owner: match[1], repo: match[2] };
-  }
-  return null;
-}
+// Cache for parsed URL info (PR #75)
+const urlParseCache = new Map<string, { owner: string; repo: string; branch: string; basePath: string } | null>();
 
 /**
- * Fetch skill list from GitHub marketplace
+ * Parse GitHub API or raw URL to extract owner, repo, branch, and base path.
+ * Supports:
+ *   - https://api.github.com/repos/owner/repo/contents/path
+ *   - https://api.github.com/repos/owner/repo/contents/path?ref=branch
+ * Returns null for non-GitHub URLs.
+ *
+ * PR #75: replaces hardcoded 'main' branch with dynamic parsing
  */
-export async function fetchSkillsFromMarketplace(): Promise<Skill[]> {
-  const settings = loadSkillsSettings();
-  const marketplaceUrl = settings.marketplaceUrl;
-
-  console.log("[SkillsLoader] Fetching skills from:", marketplaceUrl);
-
-  // Parse owner/repo from marketplace URL
-  const repoInfo = parseGitHubUrl(marketplaceUrl);
-  if (!repoInfo) {
-    throw new Error(`Invalid marketplace URL: ${marketplaceUrl}`);
+export function parseMarketplaceUrl(url: string): { owner: string; repo: string; branch: string; basePath: string } | null {
+  if (urlParseCache.has(url)) {
+    return urlParseCache.get(url)!;
   }
 
   try {
-    // Fetch skills directory listing
-    const response = await fetch(marketplaceUrl, {
-      headers: {
-        "Accept": "application/vnd.github.v3+json",
-        "User-Agent": "ValeDesk"
-      }
-    });
-
-    if (!response.ok) {
-      throw new Error(`GitHub API error: ${response.status}`);
+    const parsed = new URL(url);
+    const match = parsed.pathname.match(/^\/repos\/([^/]+)\/([^/]+)\/contents\/?(.*)$/);
+    if (!match || !parsed.hostname.includes("github.com")) {
+      urlParseCache.set(url, null);
+      return null;
     }
 
-    const contents: GitHubContent[] = await response.json();
-    const skills: Skill[] = [];
-
-    // Filter only directories (each skill is a directory)
-    const skillDirs = contents.filter(item => item.type === "dir");
-
-    // Fetch SKILL.md for each skill
-    for (const dir of skillDirs) {
-      try {
-        const skillMdUrl = `https://raw.githubusercontent.com/${repoInfo.owner}/${repoInfo.repo}/main/${dir.path}/SKILL.md`;
-        const skillMdResponse = await fetch(skillMdUrl);
-
-        if (skillMdResponse.ok) {
-          const skillMdContent = await skillMdResponse.text();
-          const metadata = parseSkillMd(skillMdContent);
-
-          if (metadata) {
-            // Determine category from path (e.g., "skills/creative/art" -> "creative")
-            const pathParts = dir.path.split("/");
-            const category = pathParts.length > 2 ? pathParts[1] : "general";
-
-            skills.push({
-              id: metadata.name,
-              name: metadata.name,
-              description: metadata.description,
-              category,
-              author: metadata.metadata?.author,
-              version: metadata.metadata?.version,
-              license: metadata.license,
-              compatibility: metadata.compatibility,
-              repoPath: dir.path,
-              enabled: false
-            });
-          }
-        }
-      } catch (error) {
-        console.warn(`[SkillsLoader] Failed to fetch skill ${dir.name}:`, error);
-      }
-    }
-
-    console.log(`[SkillsLoader] Fetched ${skills.length} skills`);
-
-    // Update store with new skills list
-    updateSkillsList(skills);
-
-    return skills;
-  } catch (error) {
-    console.error("[SkillsLoader] Failed to fetch skills:", error);
-    throw error;
+    const result = {
+      owner: match[1],
+      repo: match[2],
+      branch: parsed.searchParams.get("ref") || "main",
+      basePath: match[3] || ""
+    };
+    urlParseCache.set(url, result);
+    return result;
+  } catch {
+    urlParseCache.set(url, null);
+    return null;
   }
+}
+
+/**
+ * Fetch skills from a GitHub API repository
+ */
+async function fetchFromGitHub(repo: SkillRepository): Promise<Skill[]> {
+  const urlInfo = parseMarketplaceUrl(repo.url);
+  if (!urlInfo) {
+    throw new Error(`Invalid GitHub marketplace URL: ${repo.url}`);
+  }
+
+  const response = await fetch(repo.url, {
+    headers: {
+      "Accept": "application/vnd.github.v3+json",
+      "User-Agent": "ValeDesk"
+    }
+  });
+
+  if (!response.ok) {
+    throw new Error(`GitHub API error: ${response.status}`);
+  }
+
+  const contents: GitHubContent[] = await response.json();
+  const skills: Skill[] = [];
+
+  // Filter only directories (each skill is a directory)
+  const skillDirs = contents.filter(item => item.type === "dir");
+
+  for (const dir of skillDirs) {
+    try {
+      const skillMdUrl = `https://raw.githubusercontent.com/${urlInfo.owner}/${urlInfo.repo}/${urlInfo.branch}/${dir.path}/SKILL.md`;
+      const skillMdResponse = await fetch(skillMdUrl);
+
+      if (skillMdResponse.ok) {
+        const skillMdContent = await skillMdResponse.text();
+        const metadata = parseSkillMd(skillMdContent);
+
+        if (metadata) {
+          const pathParts = dir.path.split("/");
+          const category = pathParts.length > 2 ? pathParts[1] : "general";
+
+          skills.push({
+            id: metadata.name,
+            name: metadata.name,
+            description: metadata.description,
+            category,
+            author: metadata.metadata?.author,
+            version: metadata.metadata?.version,
+            license: metadata.license,
+            compatibility: metadata.compatibility,
+            repoPath: dir.path,
+            repositoryId: repo.id,
+            enabled: false
+          });
+        }
+      }
+    } catch (error) {
+      console.warn(`[SkillsLoader] Failed to fetch skill ${dir.name} from ${repo.name}:`, error);
+    }
+  }
+
+  return skills;
+}
+
+/**
+ * Fetch skills from a local filesystem directory.
+ * Expects: {url}/{skillId}/SKILL.md
+ */
+async function fetchFromLocal(repo: SkillRepository): Promise<Skill[]> {
+  const baseDir = repo.url;
+
+  if (!fs.existsSync(baseDir)) {
+    throw new Error(`Local skills directory not found: ${baseDir}`);
+  }
+
+  const entries = fs.readdirSync(baseDir, { withFileTypes: true });
+  const skillDirs = entries.filter(e => e.isDirectory());
+  const skills: Skill[] = [];
+
+  for (const dir of skillDirs) {
+    try {
+      const skillMdPath = path.join(baseDir, dir.name, "SKILL.md");
+      if (!fs.existsSync(skillMdPath)) continue;
+
+      const content = fs.readFileSync(skillMdPath, "utf-8");
+      const metadata = parseSkillMd(content);
+
+      if (metadata) {
+        skills.push({
+          id: metadata.name,
+          name: metadata.name,
+          description: metadata.description,
+          category: "local",
+          author: metadata.metadata?.author,
+          version: metadata.metadata?.version,
+          license: metadata.license,
+          compatibility: metadata.compatibility,
+          repoPath: dir.name,
+          repositoryId: repo.id,
+          enabled: false
+        });
+      }
+    } catch (error) {
+      console.warn(`[SkillsLoader] Failed to read local skill ${dir.name}:`, error);
+    }
+  }
+
+  return skills;
+}
+
+/**
+ * Fetch skills from a plain HTTP server.
+ * Convention:
+ *   {baseUrl}/index.json        → string[] of skill directory names
+ *   {baseUrl}/{skillId}/SKILL.md → skill metadata
+ */
+async function fetchFromHttp(repo: SkillRepository): Promise<Skill[]> {
+  const baseUrl = repo.url.replace(/\/$/, "");
+
+  const indexResponse = await fetch(`${baseUrl}/index.json`);
+  if (!indexResponse.ok) {
+    throw new Error(`HTTP repository index not found at ${baseUrl}/index.json (status: ${indexResponse.status})`);
+  }
+
+  const skillIds: string[] = await indexResponse.json();
+  const skills: Skill[] = [];
+
+  for (const skillId of skillIds) {
+    try {
+      const skillMdResponse = await fetch(`${baseUrl}/${skillId}/SKILL.md`);
+      if (!skillMdResponse.ok) continue;
+
+      const content = await skillMdResponse.text();
+      const metadata = parseSkillMd(content);
+
+      if (metadata) {
+        skills.push({
+          id: metadata.name,
+          name: metadata.name,
+          description: metadata.description,
+          category: "http",
+          author: metadata.metadata?.author,
+          version: metadata.metadata?.version,
+          license: metadata.license,
+          compatibility: metadata.compatibility,
+          repoPath: skillId,
+          repositoryId: repo.id,
+          enabled: false
+        });
+      }
+    } catch (error) {
+      console.warn(`[SkillsLoader] Failed to fetch HTTP skill ${skillId} from ${repo.name}:`, error);
+    }
+  }
+
+  return skills;
+}
+
+/**
+ * Fetch skills from a SkillsBD catalog API.
+ * SkillsBD is an open-source skill registry; actual skill files live on GitHub.
+ * Convention: {baseUrl}/api/skills returns the full catalog.
+ */
+async function fetchFromSkillsbd(repo: SkillRepository): Promise<Skill[]> {
+  const baseUrl = repo.url.replace(/\/$/, "");
+  const response = await fetch(`${baseUrl}/api/skills`);
+
+  if (!response.ok) {
+    throw new Error(`SkillsBD API error: ${response.status}`);
+  }
+
+  const items: any[] = await response.json();
+
+  return items.map(item => ({
+    id: item.id,
+    name: item.name,
+    description: item.description,
+    category: item.category,
+    author: item.authorName,
+    repoPath: `${item.owner}/${item.repo}`,
+    repositoryId: repo.id,
+    enabled: false,
+    owner: item.owner,
+    repo: item.repo,
+    contentPath: item.contentPath || null,
+    installs: item.installs,
+    trending24h: item.trending24h,
+    tags: item.tags,
+    featured: item.featured,
+    authorName: item.authorName,
+    telegramLink: item.telegramLink,
+  }));
+}
+
+/**
+ * Fetch skill list from all enabled repositories
+ */
+export async function fetchSkillsFromMarketplace(): Promise<Skill[]> {
+  const repositories = getEnabledRepositories();
+
+  console.log(`[SkillsLoader] Fetching skills from ${repositories.length} repositories`);
+
+  const allSkills: Skill[] = [];
+
+  for (const repo of repositories) {
+    try {
+      let repoSkills: Skill[];
+
+      switch (repo.type) {
+        case "github":
+          repoSkills = await fetchFromGitHub(repo);
+          break;
+        case "local":
+          repoSkills = await fetchFromLocal(repo);
+          break;
+        case "http":
+          repoSkills = await fetchFromHttp(repo);
+          break;
+        case "skillsbd":
+          repoSkills = await fetchFromSkillsbd(repo);
+          break;
+        default:
+          console.warn(`[SkillsLoader] Unknown repository type: ${(repo as any).type}`);
+          continue;
+      }
+
+      console.log(`[SkillsLoader] Fetched ${repoSkills.length} skills from ${repo.name} (${repo.type})`);
+      allSkills.push(...repoSkills);
+    } catch (error) {
+      console.error(`[SkillsLoader] Failed to fetch from repository ${repo.name}:`, error);
+    }
+  }
+
+  console.log(`[SkillsLoader] Total: ${allSkills.length} skills`);
+
+  // Update store with merged skills list
+  updateSkillsList(allSkills);
+
+  return allSkills;
 }
 
 /**
@@ -208,30 +402,59 @@ export async function fetchSkillsFromMarketplace(): Promise<Skill[]> {
  */
 export async function downloadSkill(skillId: string, cwd?: string): Promise<string> {
   const settings = loadSkillsSettings();
-  const skill = settings.skills.find(s => s.id === skillId);
+  const skill = findSkill(skillId, settings.skills);
 
   if (!skill) {
     throw new Error(`Skill not found: ${skillId}`);
   }
 
-  // Parse owner/repo from marketplace URL
-  const repoInfo = parseGitHubUrl(settings.marketplaceUrl);
-  if (!repoInfo) {
-    throw new Error(`Invalid marketplace URL: ${settings.marketplaceUrl}`);
-  }
+  // Find the repository this skill belongs to
+  const repo = settings.repositories.find(r => r.id === skill.repositoryId);
 
   const skillsDir = ensureSkillsDir(cwd);
-  const skillCacheDir = path.join(skillsDir, skillId);
+  const skillCacheDir = path.join(skillsDir, skill.id);
 
-  console.log(`[SkillsLoader] Downloading skill: ${skillId} to ${skillCacheDir}`);
+  console.log(`[SkillsLoader] Downloading skill: ${skill.id} (${skill.name}) to ${skillCacheDir}`);
 
-  // Create skill cache directory
   if (!fs.existsSync(skillCacheDir)) {
     fs.mkdirSync(skillCacheDir, { recursive: true });
   }
 
-  // Fetch skill directory contents
-  const contentsUrl = `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${skill.repoPath}`;
+  if (!repo) {
+    throw new Error(`Repository not found for skill: ${skill.id} (repositoryId: ${skill.repositoryId})`);
+  }
+
+  switch (repo.type) {
+    case "github":
+      await downloadSkillFromGitHub(skill, repo, skillCacheDir);
+      break;
+    case "local":
+      // For local repos, return the source path directly (no download needed)
+      return path.join(repo.url, skill.repoPath);
+    case "http":
+      await downloadSkillFromHttp(skill, repo, skillCacheDir);
+      break;
+    case "skillsbd":
+      await downloadSkillFromSkillsbd(skill, repo, skillCacheDir);
+      break;
+    default:
+      throw new Error(`Unsupported repository type: ${(repo as any).type}`);
+  }
+
+  return skillCacheDir;
+}
+
+async function downloadSkillFromGitHub(
+  skill: Skill,
+  repo: SkillRepository,
+  skillCacheDir: string
+): Promise<void> {
+  const urlInfo = parseMarketplaceUrl(repo.url);
+  if (!urlInfo) {
+    throw new Error(`Invalid GitHub marketplace URL: ${repo.url}`);
+  }
+
+  const contentsUrl = `https://api.github.com/repos/${urlInfo.owner}/${urlInfo.repo}/contents/${skill.repoPath}`;
   const response = await fetch(contentsUrl, {
     headers: {
       "Accept": "application/vnd.github.v3+json",
@@ -244,18 +467,138 @@ export async function downloadSkill(skillId: string, cwd?: string): Promise<stri
   }
 
   const contents: GitHubContent[] = await response.json();
+  await downloadContents(contents, skillCacheDir, skill.repoPath, urlInfo);
+}
 
-  // Download all files recursively
-  await downloadContents(contents, skillCacheDir, skill.repoPath, repoInfo);
+async function fetchGitHubContents(url: string): Promise<GitHubContent[]> {
+  const response = await fetch(url, {
+    headers: {
+      "Accept": "application/vnd.github.v3+json",
+      "User-Agent": "ValeDesk"
+    }
+  });
 
-  return skillCacheDir;
+  if (!response.ok) {
+    throw new Error(`GitHub API error ${response.status}: ${url}`);
+  }
+
+  return response.json();
+}
+
+async function downloadSkillFromSkillsbd(
+  skill: Skill,
+  repo: SkillRepository,
+  skillCacheDir: string
+): Promise<void> {
+  if (!skill.owner || !skill.repo) {
+    throw new Error(`Skill ${skill.id} missing owner/repo for GitHub download`);
+  }
+
+  const urlInfo = { owner: skill.owner, repo: skill.repo, branch: "main" };
+  const baseApiUrl = `https://api.github.com/repos/${skill.owner}/${skill.repo}/contents`;
+
+  // If contentPath is explicitly set in the catalog, use it directly
+  if (skill.contentPath) {
+    const contents = await fetchGitHubContents(`${baseApiUrl}/${skill.contentPath}`);
+    await downloadContents(contents, skillCacheDir, skill.contentPath, urlInfo);
+  } else {
+    // Auto-search for SKILL.md: root → skill.name subdir → any first-level subdir
+    const rootContents = await fetchGitHubContents(`${baseApiUrl}/`);
+
+    const skillMdAtRoot = rootContents.find(
+      f => f.type === "file" && f.name.toLowerCase() === "skill.md"
+    );
+
+    if (skillMdAtRoot) {
+      // SKILL.md is at root — this is a single-skill repo
+      await downloadContents(rootContents, skillCacheDir, "", urlInfo);
+    } else {
+      // Not at root — search subdirectories for SKILL.md
+      const subdirs = rootContents.filter(f => f.type === "dir");
+
+      // Prioritise subdirectory named after the skill
+      const nameMatch = subdirs.find(d => d.name === skill.name);
+      const searchOrder = nameMatch
+        ? [nameMatch, ...subdirs.filter(d => d.name !== skill.name)]
+        : subdirs;
+
+      let found = false;
+      for (const subdir of searchOrder) {
+        const subContents = await fetchGitHubContents(`${baseApiUrl}/${subdir.name}`);
+        const hasSkillMd = subContents.find(
+          f => f.type === "file" && f.name.toLowerCase() === "skill.md"
+        );
+
+        if (hasSkillMd) {
+          await downloadContents(subContents, skillCacheDir, subdir.name, urlInfo);
+          found = true;
+          break;
+        }
+      }
+
+      if (!found) {
+        throw new Error(
+          `SKILL.md not found in ${skill.owner}/${skill.repo} — checked root and ${subdirs.length} subdirectories`
+        );
+      }
+    }
+  }
+
+  // Fire-and-forget: track installation on skillsbd
+  const baseUrl = repo.url.replace(/\/$/, "");
+  fetch(`${baseUrl}/api/skills/install`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      name: skill.name,
+      owner: skill.owner,
+      repo: skill.repo,
+      v: skill.version || "1.0"
+    })
+  }).catch(err => console.warn("[SkillsLoader] Install tracking failed:", err));
+}
+
+async function downloadSkillFromHttp(
+  skill: Skill,
+  repo: SkillRepository,
+  skillCacheDir: string
+): Promise<void> {
+  const baseUrl = repo.url.replace(/\/$/, "");
+
+  // Download SKILL.md
+  const skillMdResponse = await fetch(`${baseUrl}/${skill.repoPath}/SKILL.md`);
+  if (!skillMdResponse.ok) {
+    throw new Error(`Failed to download SKILL.md for ${skill.id}`);
+  }
+  fs.writeFileSync(path.join(skillCacheDir, "SKILL.md"), await skillMdResponse.text(), "utf-8");
+
+  // Check for optional files.json listing additional files
+  try {
+    const filesResponse = await fetch(`${baseUrl}/${skill.repoPath}/files.json`);
+    if (filesResponse.ok) {
+      const files: string[] = await filesResponse.json();
+      for (const file of files) {
+        const fileResponse = await fetch(`${baseUrl}/${skill.repoPath}/${file}`);
+        if (fileResponse.ok) {
+          const filePath = path.join(skillCacheDir, file);
+          const fileDir = path.dirname(filePath);
+          if (!fs.existsSync(fileDir)) {
+            fs.mkdirSync(fileDir, { recursive: true });
+          }
+          fs.writeFileSync(filePath, await fileResponse.text(), "utf-8");
+        }
+      }
+    }
+  } catch {
+    // files.json is optional, ignore errors
+  }
 }
 
 async function downloadContents(
   contents: GitHubContent[],
   targetDir: string,
   basePath: string,
-  repoInfo: { owner: string; repo: string }
+  urlInfo: { owner: string; repo: string; branch: string }
 ): Promise<void> {
   for (const item of contents) {
     const localPath = path.join(targetDir, item.name);
@@ -271,7 +614,7 @@ async function downloadContents(
         fs.mkdirSync(localPath, { recursive: true });
       }
 
-      const subContentsUrl = `https://api.github.com/repos/${repoInfo.owner}/${repoInfo.repo}/contents/${item.path}`;
+      const subContentsUrl = `https://api.github.com/repos/${urlInfo.owner}/${urlInfo.repo}/contents/${item.path}`;
       const subResponse = await fetch(subContentsUrl, {
         headers: {
           "Accept": "application/vnd.github.v3+json",
@@ -281,7 +624,7 @@ async function downloadContents(
 
       if (subResponse.ok) {
         const subContents: GitHubContent[] = await subResponse.json();
-        await downloadContents(subContents, localPath, item.path, repoInfo);
+        await downloadContents(subContents, localPath, item.path, urlInfo);
       }
     }
   }
@@ -289,27 +632,40 @@ async function downloadContents(
 
 /**
  * Get cached skill directory path (or download if not cached)
- * Checks both workspace-local and global cache
+ * For local repos, returns the source path directly.
+ * Checks both workspace-local and global cache for github/http skills.
  * @param skillId - The skill ID
  * @param cwd - Optional working directory
  */
 export async function getSkillPath(skillId: string, cwd?: string): Promise<string> {
+  const settings = loadSkillsSettings();
+  const skill = findSkill(skillId, settings.skills);
+  const resolvedId = skill?.id ?? skillId;
+
+  // For local repos, serve directly from source
+  if (skill) {
+    const repo = settings.repositories.find(r => r.id === skill.repositoryId);
+    if (repo?.type === "local") {
+      return path.join(repo.url, skill.repoPath);
+    }
+  }
+
   // First check workspace-local cache
   if (cwd) {
-    const localSkillDir = path.join(getSkillsDir(cwd), skillId);
+    const localSkillDir = path.join(getSkillsDir(cwd), resolvedId);
     if (fs.existsSync(localSkillDir) && fs.existsSync(path.join(localSkillDir, "SKILL.md"))) {
       return localSkillDir;
     }
   }
 
   // Then check global cache
-  const globalSkillDir = path.join(getGlobalSkillsDir(), skillId);
+  const globalSkillDir = path.join(getGlobalSkillsDir(), resolvedId);
   if (fs.existsSync(globalSkillDir) && fs.existsSync(path.join(globalSkillDir, "SKILL.md"))) {
     return globalSkillDir;
   }
 
   // Download to workspace-local or global (based on cwd)
-  return downloadSkill(skillId, cwd);
+  return downloadSkill(resolvedId, cwd);
 }
 
 /**

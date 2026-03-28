@@ -1403,9 +1403,10 @@ function App() {
       )}
 
       {showFileBrowser && activeSession?.cwd && (
-        <FileBrowser 
-          cwd={activeSession.cwd} 
-          onClose={() => setShowFileBrowser(false)} 
+        <FileBrowser
+          cwd={activeSession.cwd}
+          onClose={() => setShowFileBrowser(false)}
+          useBuiltinViewer={apiSettings?.useBuiltinViewer ?? true}
         />
       )}
 

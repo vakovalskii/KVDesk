@@ -119,6 +119,16 @@ export function createTauriPlatform(): PlatformAdapter {
           const path = String(args[0] ?? "");
           return tauriInvoke("list_directory", { path });
         }
+        case "get-thumbnail": {
+          const path = String(args[0] ?? "");
+          const size = args[1] !== undefined ? Number(args[1]) : 128;
+          return tauriInvoke("get_thumbnail", { path, size });
+        }
+        case "get-file-text-preview": {
+          const path = String(args[0] ?? "");
+          const maxBytes = args[1] !== undefined ? Number(args[1]) : 4096;
+          return tauriInvoke("get_file_text_preview", { path, maxBytes });
+        }
         case "read-memory": {
           return tauriInvoke("read_memory");
         }

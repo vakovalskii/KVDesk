@@ -1,16 +1,17 @@
 import { useCallback, useEffect, useState } from "react";
 import * as Dialog from "@radix-ui/react-dialog";
-import type { 
-  ApiSettings, 
-  WebSearchProvider, 
-  ZaiApiUrl, 
-  ZaiReaderApiUrl, 
+import type {
+  ApiSettings,
+  WebSearchProvider,
+  ZaiApiUrl,
+  ZaiReaderApiUrl,
   LLMProvider,
   LLMModel,
   LLMProviderSettings,
   LLMProviderType,
   RoleGroupSettings,
-  Skill
+  Skill,
+  SkillRepository
 } from "../types";
 import { SkillsTab } from "./SkillsTab";
 import { getPlatform } from "../platform";
@@ -56,6 +57,7 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
   const [enableFetchTools, setEnableFetchTools] = useState(currentSettings?.enableFetchTools || false);
   const [enableImageTools, setEnableImageTools] = useState(currentSettings?.enableImageTools ?? false);
   const [useGitForDiff, setUseGitForDiff] = useState(currentSettings?.useGitForDiff ?? true);
+  const [useBuiltinViewer, setUseBuiltinViewer] = useState(currentSettings?.useBuiltinViewer ?? true);
   const [requestTimeoutMs, setRequestTimeoutMs] = useState(currentSettings?.requestTimeoutMs?.toString() || "300000");
   const [memoryLoading, setMemoryLoading] = useState(false);
   const [showTavilyPassword, setShowTavilyPassword] = useState(false);
@@ -89,7 +91,7 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
 
   // Skills state
   const [skills, setSkills] = useState<Skill[]>([]);
-  const [skillsMarketplaceUrl, setSkillsMarketplaceUrl] = useState("");
+  const [skillsRepositories, setSkillsRepositories] = useState<SkillRepository[]>([]);
   const [skillsLastFetched, setSkillsLastFetched] = useState<number | undefined>();
   const [skillsLoading, setSkillsLoading] = useState(false);
   const [skillsError, setSkillsError] = useState<string | null>(null);
@@ -143,6 +145,7 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
       setEnableFetchTools(currentSettings.enableFetchTools || false);
       setEnableImageTools(currentSettings.enableImageTools ?? false);
       setUseGitForDiff(currentSettings.useGitForDiff ?? true);
+      setUseBuiltinViewer(currentSettings.useBuiltinViewer ?? true);
     }
     setRoleGroupSettings(getRoleGroupSettings(currentSettings));
     
@@ -236,32 +239,71 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
   }, []);
 
   const toggleSkill = useCallback((skillId: string, enabled: boolean) => {
+    console.log("[SettingsModal] toggleSkill:", skillId, enabled);
     getPlatform().sendClientEvent({ type: "skills.toggle", payload: { skillId, enabled } });
-    setSkills(prev => prev.map(s => s.id === skillId ? { ...s, enabled } : s));
+    setSkills(prev => {
+      console.log("[SettingsModal] optimistic update, prev count:", prev.length);
+      return prev.map(s => s.id === skillId ? { ...s, enabled } : s);
+    });
   }, []);
 
-  const setMarketplaceUrl = useCallback((url: string) => {
-    getPlatform().sendClientEvent({ type: "skills.set-marketplace", payload: { url } });
-    setSkillsMarketplaceUrl(url);
+  const handleAddRepository = useCallback((repo: Omit<SkillRepository, "id">) => {
+    getPlatform().sendClientEvent({ type: "skills.add-repository", payload: { repo } });
+  }, []);
+
+  const handleUpdateRepository = useCallback((id: string, updates: Partial<Omit<SkillRepository, "id">>) => {
+    getPlatform().sendClientEvent({ type: "skills.update-repository", payload: { id, updates } });
+  }, []);
+
+  const handleRemoveRepository = useCallback((id: string) => {
+    getPlatform().sendClientEvent({ type: "skills.remove-repository", payload: { id } });
+  }, []);
+
+  const handleToggleRepository = useCallback((id: string, enabled: boolean) => {
+    getPlatform().sendClientEvent({ type: "skills.toggle-repository", payload: { id, enabled } });
+    setSkillsRepositories(prev => prev.map(r => r.id === id ? { ...r, enabled } : r));
   }, []);
 
   // Load skills on mount
   useEffect(() => {
-    loadSkills();
-    
+    console.log("[SettingsModal] registering skills onServerEvent listener");
     const unsubscribe = getPlatform().onServerEvent((event) => {
+      console.log("[SettingsModal] onServerEvent received:", event.type, event.payload);
       if (event.type === "skills.loaded") {
-        setSkills(event.payload.skills);
-        setSkillsMarketplaceUrl(event.payload.marketplaceUrl);
-        setSkillsLastFetched(event.payload.lastFetched);
+        console.log("[SettingsModal] skills.loaded - skills count:", event.payload?.skills?.length, "repos count:", event.payload?.repositories?.length);
+        console.log("[SettingsModal] skills sample:", JSON.stringify(event.payload?.skills?.[0]));
+        if (Array.isArray(event.payload?.skills)) {
+          try {
+            setSkills(event.payload.skills);
+            console.log("[SettingsModal] setSkills OK");
+          } catch (e) {
+            console.error("[SettingsModal] setSkills THREW:", e);
+          }
+        }
+        if (Array.isArray(event.payload?.repositories)) {
+          try {
+            setSkillsRepositories(event.payload.repositories);
+            console.log("[SettingsModal] setSkillsRepositories OK");
+          } catch (e) {
+            console.error("[SettingsModal] setSkillsRepositories THREW:", e);
+          }
+        }
+        setSkillsLastFetched(event.payload?.lastFetched);
         setSkillsLoading(false);
       } else if (event.type === "skills.error") {
+        console.error("[SettingsModal] skills.error:", event.payload.message);
         setSkillsError(event.payload.message);
         setSkillsLoading(false);
       }
+    }, () => {
+      console.log("[SettingsModal] onReady - calling loadSkills");
+      loadSkills();
     });
 
-    return () => unsubscribe();
+    return () => {
+      console.log("[SettingsModal] unsubscribing skills listener");
+      unsubscribe();
+    };
   }, [loadSkills]);
 
   const handleSave = async () => {
@@ -309,6 +351,7 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
       enableFetchTools,
       enableImageTools,
       useGitForDiff,
+      useBuiltinViewer,
       requestTimeoutMs: parseInt(requestTimeoutMs) || 300000,
       llmProviders: llmProviderSettings,
       roleGroupSettings,
@@ -356,7 +399,17 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
   };
 
   useEffect(() => {
+    const onError = (event: ErrorEvent) => {
+      console.error("[SettingsModal] window.onerror:", event.message, event.filename, event.lineno, event.error);
+    };
+    const onUnhandledRejection = (event: PromiseRejectionEvent) => {
+      console.error("[SettingsModal] unhandledrejection:", event.reason);
+    };
+    window.addEventListener("error", onError);
+    window.addEventListener("unhandledrejection", onUnhandledRejection);
     return () => {
+      window.removeEventListener("error", onError);
+      window.removeEventListener("unhandledrejection", onUnhandledRejection);
       if ((window as any).__llmProvidersUnsubscribe) {
         (window as any).__llmProvidersUnsubscribe();
       }
@@ -365,6 +418,8 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
       }
     };
   }, []);
+
+  console.log("[SettingsModal] render - activeTab:", activeTab, "skillsLoading:", skillsLoading, "skills:", skills.length);
 
   const roleModelOptions: RoleModelOption[] = (() => {
     const enabledModels = llmModels.filter(m => m.enabled);
@@ -381,10 +436,14 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
   })();
 
   return (
-    <Dialog.Root open onOpenChange={onClose}>
+    <Dialog.Root open onOpenChange={(open) => {
+        console.error('[SettingsModal] Dialog.onOpenChange called! open=', open);
+        console.trace('[SettingsModal] onOpenChange trace');
+        onClose();
+      }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed top-24 left-0 right-0 bottom-0 z-50 bg-black/30 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-16 z-50 -translate-x-1/2 w-full max-w-3xl max-h-[calc(100vh-6rem)] rounded-2xl border border-ink-900/10 bg-surface shadow-2xl flex flex-col overflow-hidden">
+        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[85vh] rounded-2xl border border-ink-900/10 bg-surface shadow-2xl flex flex-col overflow-hidden">
           <div className="flex-shrink-0 px-6 pt-6 pb-4 border-b border-ink-900/10">
             <Dialog.Title className="text-xl font-semibold text-ink-900">
               {t('settings.title')}
@@ -514,18 +573,23 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
                 setEnableImageTools={setEnableImageTools}
                 useGitForDiff={useGitForDiff}
                 setUseGitForDiff={setUseGitForDiff}
+                useBuiltinViewer={useBuiltinViewer}
+                setUseBuiltinViewer={setUseBuiltinViewer}
               />
             ) : activeTab === 'skills' ? (
               <div className="p-6">
                 <SkillsTab
                   skills={skills}
-                  marketplaceUrl={skillsMarketplaceUrl}
+                  repositories={skillsRepositories}
                   lastFetched={skillsLastFetched}
                   loading={skillsLoading}
                   error={skillsError}
                   onToggleSkill={toggleSkill}
                   onRefresh={refreshSkills}
-                  onSetMarketplaceUrl={setMarketplaceUrl}
+                  onAddRepository={handleAddRepository}
+                  onUpdateRepository={handleUpdateRepository}
+                  onRemoveRepository={handleRemoveRepository}
+                  onToggleRepository={handleToggleRepository}
                 />
               </div>
             ) : activeTab === 'roles' ? (
@@ -875,6 +939,11 @@ function LLMModelsTab({
                   </div>
                 </div>
 
+                {/* Codex OAuth Login/Status */}
+                {!collapsedProviders[provider.id] && provider.type === 'codex' && (
+                  <CodexOAuthPanel providerId={provider.id} />
+                )}
+
                 {!collapsedProviders[provider.id] && providerModels.length > 0 && (
                   <>
                     {providerModels.length > 5 && (
@@ -954,6 +1023,169 @@ function LLMModelsTab({
   );
 }
 
+function CodexLoginSection({ onLoginSuccess }: { onLoginSuccess: () => void }) {
+  const [status, setStatus] = useState<'checking' | 'logged_in' | 'logged_out' | 'logging_in'>('checking');
+  const [email, setEmail] = useState<string | null>(null);
+
+  useEffect(() => {
+    getPlatform().sendClientEvent({ type: "oauth.status.get", payload: { provider: "openai" } });
+
+    const unsub = getPlatform().onServerEvent((event) => {
+      if (event.type === "oauth.status" && event.payload.provider === "openai") {
+        if (event.payload.loggedIn) {
+          setStatus('logged_in');
+          setEmail(event.payload.email || null);
+          onLoginSuccess();
+        } else {
+          setStatus('logged_out');
+        }
+      }
+      if (event.type === "oauth.flow.completed") {
+        setStatus('logged_in');
+        setEmail(event.payload.email || null);
+        onLoginSuccess();
+      }
+      if (event.type === "oauth.flow.error") {
+        setStatus('logged_out');
+      }
+    });
+    return () => { unsub?.(); };
+  }, []);
+
+  const handleLogin = () => {
+    setStatus('logging_in');
+    getPlatform().sendClientEvent({ type: "oauth.login", payload: { provider: "openai", method: "browser" } });
+  };
+
+  if (status === 'checking') {
+    return (
+      <div className="p-3 bg-gray-50 border border-gray-200 rounded-lg">
+        <p className="text-sm text-gray-600">Checking for existing OpenAI credentials...</p>
+      </div>
+    );
+  }
+
+  if (status === 'logged_in') {
+    return (
+      <div className="p-3 bg-emerald-50 border border-emerald-200 rounded-lg">
+        <div className="flex items-center gap-2">
+          <div className="w-2 h-2 rounded-full bg-green-500" />
+          <span className="text-sm text-green-700 font-medium">
+            {email ? `Connected as ${email}` : 'Connected to OpenAI'}
+          </span>
+        </div>
+        <p className="text-xs text-emerald-600 mt-1">
+          Endpoint: chatgpt.com/backend-api/codex | Uses your OpenAI subscription
+        </p>
+      </div>
+    );
+  }
+
+  return (
+    <div className="p-3 bg-amber-50 border border-amber-200 rounded-lg space-y-3">
+      <p className="text-sm text-amber-800">
+        <strong>OpenAI Codex</strong> — uses your OpenAI subscription via OAuth.
+        {' '}No API key needed. If you have Codex CLI installed, credentials will be auto-detected.
+      </p>
+      <button
+        type="button"
+        onClick={handleLogin}
+        disabled={status === 'logging_in'}
+        className="w-full px-4 py-2.5 text-sm font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-50 flex items-center justify-center gap-2"
+      >
+        {status === 'logging_in' ? (
+          <>
+            <svg className="animate-spin h-4 w-4" xmlns="http://www.w3.org/2000/svg" fill="none" viewBox="0 0 24 24">
+              <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4"></circle>
+              <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4zm2 5.291A7.962 7.962 0 014 12H0c0 3.042 1.135 5.824 3 7.938l3-2.647z"></path>
+            </svg>
+            Opening browser...
+          </>
+        ) : (
+          'Login with OpenAI'
+        )}
+      </button>
+    </div>
+  );
+}
+
+function CodexOAuthPanel({ providerId: _providerId }: { providerId: string }) {
+  void _providerId;
+  const [status, setStatus] = useState<'unknown' | 'checking' | 'logged_in' | 'logged_out'>('unknown');
+  const [email, setEmail] = useState<string | null>(null);
+  const [loggingIn, setLoggingIn] = useState(false);
+
+  useEffect(() => {
+    setStatus('checking');
+    getPlatform().sendClientEvent({ type: "oauth.status.get", payload: { provider: "openai" } });
+
+    const handler = (event: any) => {
+      if (event.type === "oauth.status" && event.payload.provider === "openai") {
+        setStatus(event.payload.loggedIn ? 'logged_in' : 'logged_out');
+        setEmail(event.payload.email || null);
+        setLoggingIn(false);
+      }
+      if (event.type === "oauth.flow.completed") {
+        setStatus('logged_in');
+        setEmail(event.payload.email || null);
+        setLoggingIn(false);
+      }
+      if (event.type === "oauth.flow.error") {
+        setStatus('logged_out');
+        setLoggingIn(false);
+      }
+    };
+
+    const unsub = getPlatform().onServerEvent(handler);
+    return () => { unsub?.(); };
+  }, []);
+
+  const handleLogin = () => {
+    setLoggingIn(true);
+    getPlatform().sendClientEvent({ type: "oauth.login", payload: { provider: "openai", method: "browser" } });
+  };
+
+  const handleLogout = () => {
+    getPlatform().sendClientEvent({ type: "oauth.logout", payload: { provider: "openai" } });
+    setStatus('logged_out');
+    setEmail(null);
+  };
+
+  return (
+    <div className="px-4 py-3 border-t border-ink-200 bg-emerald-50/50">
+      {status === 'logged_in' ? (
+        <div className="flex items-center justify-between">
+          <div className="flex items-center gap-2">
+            <div className="w-2 h-2 rounded-full bg-green-500" />
+            <span className="text-sm text-green-700 font-medium">
+              {email ? `Logged in as ${email}` : 'Logged in to OpenAI'}
+            </span>
+          </div>
+          <button
+            onClick={handleLogout}
+            className="text-xs text-red-600 hover:underline"
+          >
+            Logout
+          </button>
+        </div>
+      ) : (
+        <div className="flex items-center justify-between">
+          <span className="text-sm text-ink-600">
+            {status === 'checking' ? 'Checking auth...' : 'Not logged in to OpenAI'}
+          </span>
+          <button
+            onClick={handleLogin}
+            disabled={loggingIn || status === 'checking'}
+            className="px-3 py-1.5 text-xs font-medium text-white bg-emerald-600 rounded-lg hover:bg-emerald-700 transition-colors disabled:opacity-50"
+          >
+            {loggingIn ? 'Opening browser...' : 'Login with OpenAI'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmModels }: { 
   onAdd: () => void; 
   providers: LLMProvider[]; 
@@ -970,6 +1202,7 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
   const [baseUrl, setBaseUrl] = useState('');
   const [useRemoteOllama, setUseRemoteOllama] = useState(false);
   const [zaiApiPrefix, setZaiApiPrefix] = useState<'default' | 'coding'>('default');
+  const [proxyUrl, setProxyUrl] = useState('');
   const [error, setError] = useState('');
   const [testing, setTesting] = useState(false);
   const [testSuccess, setTestSuccess] = useState(false);
@@ -1005,8 +1238,8 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
       ? (useRemoteOllama ? baseUrl.trim() : OLLAMA_LOCAL_URL)
       : baseUrl.trim();
 
-    // API key not required for Claude Code and Ollama
-    if (type !== 'claude-code' && type !== 'ollama' && !apiKey.trim()) {
+    // API key not required for Claude Code, Ollama, and Codex
+    if (type !== 'claude-code' && type !== 'ollama' && type !== 'codex' && !apiKey.trim()) {
       setError('API key is required');
       setTesting(false);
       return;
@@ -1027,9 +1260,10 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
       id: `temp-${Date.now()}`,
       type,
       name: name.trim() || 'Test Provider',
-      apiKey: (type === 'claude-code' || type === 'ollama') ? '' : apiKey.trim(),
-      baseUrl: type === 'openrouter' || type === 'claude-code' ? undefined : resolvedBaseUrl,
+      apiKey: (type === 'claude-code' || type === 'ollama' || type === 'codex') ? '' : apiKey.trim(),
+      baseUrl: type === 'openrouter' || type === 'claude-code' || type === 'codex' ? undefined : resolvedBaseUrl,
       zaiApiPrefix: type === 'zai' ? zaiApiPrefix : undefined,
+      proxyUrl: proxyUrl.trim() || undefined,
       enabled: true,
     };
 
@@ -1082,8 +1316,8 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
       return;
     }
 
-    // API key not required for Claude Code and Ollama
-    if (type !== 'claude-code' && type !== 'ollama' && !apiKey.trim()) {
+    // API key not required for Claude Code, Ollama, and Codex
+    if (type !== 'claude-code' && type !== 'ollama' && type !== 'codex' && !apiKey.trim()) {
       setError('API key is required');
       return;
     }
@@ -1101,9 +1335,10 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
       id: `${type}-${name.toLowerCase().replace(/\s+/g, '-')}-${Date.now()}`,
       type,
       name: name.trim(),
-      apiKey: (type === 'claude-code' || type === 'ollama') ? '' : apiKey.trim(),
-      baseUrl: type === 'openrouter' || type === 'claude-code' ? undefined : resolvedBaseUrl,
+      apiKey: (type === 'claude-code' || type === 'ollama' || type === 'codex') ? '' : apiKey.trim(),
+      baseUrl: type === 'openrouter' || type === 'claude-code' || type === 'codex' ? undefined : resolvedBaseUrl,
       zaiApiPrefix: type === 'zai' ? zaiApiPrefix : undefined,
+      proxyUrl: proxyUrl.trim() || undefined,
       enabled: true,
     };
 
@@ -1150,6 +1385,7 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
     setBaseUrl('');
     setUseRemoteOllama(false);
     setZaiApiPrefix('default');
+    setProxyUrl('');
     setError('');
     setTestSuccess(false);
     setAvailableModels([]);
@@ -1186,6 +1422,7 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
                   <option value="zai">Z.AI</option>
                   <option value="ollama">Ollama</option>
                   <option value="claude-code">Claude Code (Subscription)</option>
+                  <option value="codex">OpenAI Codex (OAuth)</option>
                 </select>
               </div>
 
@@ -1246,8 +1483,8 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
                 </div>
               )}
 
-              {/* API Key - not needed for Claude Code and Ollama */}
-              {type !== 'claude-code' && type !== 'ollama' && (
+              {/* API Key - not needed for Claude Code, Ollama, and Codex */}
+              {type !== 'claude-code' && type !== 'ollama' && type !== 'codex' && (
                 <div>
                   <label className="block text-sm font-medium text-ink-700 mb-2">
                     {t('settings.apiKey')}
@@ -1271,12 +1508,40 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
                   </p>
                 </div>
               )}
+
+              {/* Codex OAuth info + login */}
+              {type === 'codex' && (
+                <CodexLoginSection
+                  onLoginSuccess={() => {
+                    // Auto-trigger test connection after login
+                    setTestSuccess(false);
+                    handleTestConnection();
+                  }}
+                />
+              )}
               
+              {/* Proxy URL - optional for all providers */}
+              <div>
+                <label className="block text-sm font-medium text-ink-700 mb-2">
+                  Proxy URL <span className="text-ink-400 font-normal">(optional)</span>
+                </label>
+                <input
+                  type="text"
+                  value={proxyUrl}
+                  onChange={(e) => setProxyUrl(e.target.value)}
+                  placeholder="http://proxy:8080 or socks5://proxy:1080"
+                  className="w-full px-4 py-2.5 text-sm border border-ink-900/20 rounded-lg bg-white focus:outline-none focus:ring-2 focus:ring-accent/20"
+                />
+                <p className="text-xs text-ink-400 mt-1">
+                  Falls back to HTTP_PROXY / HTTPS_PROXY env vars if empty
+                </p>
+              </div>
+
               {/* Test Connection Button */}
               <button
                 type="button"
                 onClick={handleTestConnection}
-                disabled={testing || ((type !== 'claude-code' && type !== 'ollama') && !apiKey.trim()) || (type === 'openai' && !baseUrl.trim()) || (type === 'ollama' && useRemoteOllama && !baseUrl.trim())}
+                disabled={testing || ((type !== 'claude-code' && type !== 'ollama' && type !== 'codex') && !apiKey.trim()) || (type === 'openai' && !baseUrl.trim()) || (type === 'ollama' && useRemoteOllama && !baseUrl.trim())}
                 className="w-full px-4 py-2.5 text-sm font-medium text-white bg-blue-600 rounded-lg hover:bg-blue-700 transition-colors disabled:opacity-50 disabled:cursor-not-allowed flex items-center justify-center gap-2"
               >
                 {testing ? (
@@ -1350,6 +1615,7 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
                       setApiKey('');
                       setBaseUrl('');
                       setZaiApiPrefix('default');
+                      setProxyUrl('');
                       setError('');
                       setTestSuccess(false);
                       setAvailableModels([]);
@@ -1377,6 +1643,7 @@ function AddProviderButton({ onAdd, providers, models, setLlmProviders, setLlmMo
                     setApiKey('');
                     setBaseUrl('');
                     setZaiApiPrefix('default');
+                    setProxyUrl('');
                     setError('');
                     setTestSuccess(false);
                     setAvailableModels([]);
@@ -1603,7 +1870,9 @@ function ToolsTab({
   enableImageTools,
   setEnableImageTools,
   useGitForDiff,
-  setUseGitForDiff
+  setUseGitForDiff,
+  useBuiltinViewer,
+  setUseBuiltinViewer
 }: any) {
   const { t } = useI18n();
   return (
@@ -1719,7 +1988,7 @@ function ToolsTab({
             <div className="flex-1">
               <span className="block text-sm font-medium text-ink-700">{t('settings.useGitForDiff')}</span>
               <p className="mt-0.5 text-xs text-ink-500">
-                {useGitForDiff 
+                {useGitForDiff
                   ? t('settings.gitForDiffOn')
                   : t('settings.gitForDiffOff')}
               </p>
@@ -1729,6 +1998,33 @@ function ToolsTab({
                 type="checkbox"
                 checked={useGitForDiff}
                 onChange={(e) => setUseGitForDiff(e.target.checked)}
+                className="sr-only peer"
+              />
+              <div className="w-11 h-6 bg-ink-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-accent/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-ink-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-accent"></div>
+            </div>
+          </label>
+        </div>
+
+        {/* File Viewer */}
+        <div className="border-t border-ink-900/10 pt-4 mt-4">
+          <label className="block text-sm font-medium text-ink-700 mb-3">
+            {t('settings.fileViewer')}
+            <span className="ml-2 text-xs font-normal text-ink-500">{t('settings.fileViewerDesc')}</span>
+          </label>
+          <label className="flex items-center justify-between cursor-pointer">
+            <div className="flex-1">
+              <span className="block text-sm font-medium text-ink-700">{t('settings.useBuiltinViewer')}</span>
+              <p className="mt-0.5 text-xs text-ink-500">
+                {useBuiltinViewer
+                  ? t('settings.builtinViewerOn')
+                  : t('settings.builtinViewerOff')}
+              </p>
+            </div>
+            <div className="relative">
+              <input
+                type="checkbox"
+                checked={useBuiltinViewer}
+                onChange={(e) => setUseBuiltinViewer(e.target.checked)}
                 className="sr-only peer"
               />
               <div className="w-11 h-6 bg-ink-200 peer-focus:outline-none peer-focus:ring-2 peer-focus:ring-accent/20 rounded-full peer peer-checked:after:translate-x-full peer-checked:after:border-white after:content-[''] after:absolute after:top-[2px] after:left-[2px] after:bg-white after:border-ink-300 after:border after:rounded-full after:h-5 after:w-5 after:transition-all peer-checked:bg-accent"></div>

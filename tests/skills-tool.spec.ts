@@ -8,6 +8,7 @@ const enabledSkills = [
     name: "Skill One",
     description: "Does something",
     repoPath: "skills/skill-1",
+    repositoryId: "default",
     enabled: true
   }
 ];
@@ -19,14 +20,22 @@ const allSkills = [
     name: "Skill Two",
     description: "Disabled skill",
     repoPath: "skills/skill-2",
+    repositoryId: "default",
     enabled: false
   }
 ];
 
-vi.mock("../src/agent/libs/skills-store.js", () => ({
-  getEnabledSkills: () => enabledSkills,
-  loadSkillsSettings: () => ({ marketplaceUrl: "", skills: allSkills })
-}));
+vi.mock("../src/agent/libs/skills-store.js", async (importOriginal) => {
+  const actual = await importOriginal<typeof import("../src/agent/libs/skills-store.js")>();
+  return {
+    ...actual,
+    getEnabledSkills: () => enabledSkills,
+    loadSkillsSettings: () => ({
+      repositories: [{ id: "default", name: "Default", type: "github", url: "", enabled: true }],
+      skills: allSkills
+    })
+  };
+});
 
 vi.mock("../src/agent/libs/skills-loader.js", () => ({
   readSkillContent: async () => "## Skill Content",

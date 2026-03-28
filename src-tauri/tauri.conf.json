@@ -40,6 +40,15 @@
     ],
     "resources": {
       "../dist-sidecar/agent/libs/prompts": "prompts"
+    },
+    "macOS": {
+      "signingIdentity": "Developer ID Application: Valeriy Kovalsky (A933C2TJXU)",
+      "minimumSystemVersion": "10.15"
+    },
+    "windows": {
+      "certificateThumbprint": null,
+      "digestAlgorithm": "sha256",
+      "timestampUrl": "http://timestamp.digicert.com"
     }
   }
 }

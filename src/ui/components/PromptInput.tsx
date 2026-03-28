@@ -41,21 +41,20 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
     if (activeSessionId && !trimmedPrompt) return;
 
     if (!activeSessionId) {
-      // Resolve selected model: LLM provider models keep full id (with ::), legacy models use name
+      // For LLM provider models (containing ::), pass the full id so the runner
+      // can identify the provider. For legacy models, resolve to API name.
       const state = useAppStore.getState();
-      const llmModel = state.llmModels?.find(m => m.id === selectedModel);
-      const apiModelName = llmModel
-        ? llmModel.id  // LLM provider model: send full id with :: so backend can resolve provider
-        : (state.availableModels?.find(m => m.id === selectedModel)?.name ?? selectedModel);
+      const isProviderModel = selectedModel?.includes('::');
+      const apiModelName = isProviderModel
+        ? selectedModel
+        : (state.llmModels?.find(m => m.id === selectedModel)?.name
+          ?? state.availableModels?.find(m => m.id === selectedModel)?.name
+          ?? selectedModel);
 
       setPendingStart(true);
       
-      // Generate title from first 3 words of prompt
-      let title = "New Chat";
-      if (trimmedPrompt) {
-        const words = trimmedPrompt.split(/\s+/).slice(0, 3);
-        title = words.map(w => w.charAt(0).toUpperCase() + w.slice(1).toLowerCase()).join(" ");
-      }
+      // Title starts as "New Chat"; backend will auto-generate via LLM
+      const title = "New Chat";
       sendEvent({
         type: "session.start",
         payload: {
@@ -67,11 +66,11 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
           temperature: sendTemperature ? selectedTemperature : undefined
         }
       });
-      // Save API model name as default for future sessions (API expects name, not internal id)
+      // Save selected model as default for future sessions
       if (selectedModel) {
         sendEvent({
           type: "scheduler.default_model.set",
-          payload: { modelId: apiModelName }
+          payload: { modelId: isProviderModel ? selectedModel : (apiModelName || selectedModel) }
         } as ClientEvent);
       }
       // Save temperature as default for future sessions
