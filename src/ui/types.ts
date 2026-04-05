@@ -1,8 +1,8 @@
 import type { SDKMessage, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import type { MiniWorkflow, MiniWorkflowSummary, MiniWorkflowTestResult } from "../shared/mini-workflow-types";
-export type { MiniWorkflow, MiniWorkflowSummary, MiniWorkflowTestResult } from "../shared/mini-workflow-types";
-export { detectPermissions } from "../shared/mini-workflow-types";
-export type { DetectedPermissions } from "../shared/mini-workflow-types";
+import type { MiniWorkflow, MiniWorkflowSummary, MiniWorkflowTestResult } from "../shared/mini-workflow-types.js";
+export type { MiniWorkflow, MiniWorkflowSummary, MiniWorkflowTestResult } from "../shared/mini-workflow-types.js";
+export { detectPermissions } from "../shared/mini-workflow-types.js";
+export type { DetectedPermissions } from "../shared/mini-workflow-types.js";
 
 export type UserPromptMessage = {
   type: "user_prompt";

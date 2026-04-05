@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from "react";
-import type { MiniWorkflow, ChainStep } from "../../shared/mini-workflow-types";
+import type { MiniWorkflow, ChainStep } from "../../shared/mini-workflow-types.js";
 import { detectPermissions } from "../types";
 import MDContent from "../render/markdown";
 import { getPlatform } from "../platform";
