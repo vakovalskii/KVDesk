@@ -343,6 +343,7 @@ function App() {
   const setSendTemperature = useAppStore((s) => s.setSendTemperature);
   const availableModels = useAppStore((s) => s.availableModels);
   const llmModels = useAppStore((s) => s.llmModels);
+  const llmProviders = useAppStore((s) => s.llmProviders);
 
   const sessions = useAppStore((s) => s.sessions);
   const sessionsLoaded = useAppStore((s) => s.sessionsLoaded);
