@@ -2405,7 +2405,8 @@ async function handleClientEvent(event: ClientEvent) {
             }
           }
 
-          emitStepProgress(`✅ Все ${llmSteps.length} шагов выполнены.`);
+          const totalSteps = scriptSteps.length + llmSteps.length;
+          emitStepProgress(`✅ Все ${totalSteps} шагов выполнены.`);
 
           if (replayWorkflow.source_result?.description) {
             emitStepProgress(`🔍 Верификация результата...`);

@@ -3002,7 +3002,8 @@ ${sourceCtx}
           }
         }
 
-        emitStepProgress(`✅ Все ${llmSteps.length} шагов выполнены.`);
+        const totalSteps = scriptSteps.length + llmSteps.length;
+        emitStepProgress(`✅ Все ${totalSteps} шагов выполнены.`);
 
         // ─── Verification: compare replay result with original session result ───
         if (workflow.source_result?.description) {
