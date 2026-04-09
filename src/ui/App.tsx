@@ -1305,7 +1305,7 @@ function App() {
                     onChange={(e) => setRunModel(e.target.value)}
                   >
                     {enabledModels.map((m) => (
-                      <option key={m.id} value={m.id}>{m.name}</option>
+                      <option key={m.id} value={m.id}>{m.name} ({llmProviders.find(p => p.id === m.providerId)?.name || m.providerType})</option>
                     ))}
                   </select>
                 );
