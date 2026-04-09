@@ -275,7 +275,7 @@ export type ServerEvent =
   | { type: "miniworkflow.list"; payload: { workflows: MiniWorkflowSummary[] } }
   | { type: "miniworkflow.loaded"; payload: { workflow: MiniWorkflow } }
   | { type: "miniworkflow.distill.progress"; payload: { sessionId: string; step: number; totalSteps: number; label: string; usage?: { input_tokens: number; output_tokens: number } } }
-  | { type: "miniworkflow.distill.result"; payload: { sessionId: string; usage?: { input_tokens: number; output_tokens: number }; debugLogPath?: string; result: { status: "success"; workflow: MiniWorkflow } | { status: "needs_clarification"; questions: string[] } | { status: "not_suitable"; reason: string; suggest_prompt_preset: boolean } } }
+  | { type: "miniworkflow.distill.result"; payload: { sessionId: string; usage?: { input_tokens: number; output_tokens: number }; debugLogPath?: string; result: { status: "success"; workflow: MiniWorkflow } | { status: "needs_clarification"; questions: string[] } | { status: "not_suitable"; reason: string; suggest_prompt_preset: boolean } | { status: "cancelled" } } }
   | { type: "miniworkflow.replay.started"; payload: { workflowId: string; sessionId: string } }
   | { type: "miniworkflow.replay.verified"; payload: { workflowId: string; sessionId: string; verification: { match: boolean; summary: string; discrepancies: string[]; suggestions: string[] }; verifyCycles?: { used: number; max: number }; replayArtifacts?: { filesCreated: string[]; stepResults: Record<string, string>; workspaceDir?: string } } }
   | { type: "miniworkflow.refine.result"; payload: { sessionId: string; result: { status: "success"; message: string; workflow: MiniWorkflow } | { status: "error"; message: string } } }
@@ -337,6 +337,7 @@ export type ClientEvent =
   | { type: "miniworkflow.list"; payload?: { cwd?: string } }
   | { type: "miniworkflow.get"; payload: { workflowId: string; cwd?: string } }
   | { type: "miniworkflow.distill"; payload: { sessionId: string; validationErrors?: string[]; model?: string; maxVerifyCycles?: number } }
+  | { type: "miniworkflow.distill.cancel"; payload: { sessionId: string } }
   | { type: "miniworkflow.archive"; payload: { workflowId: string; cwd?: string } }
   | { type: "miniworkflow.save"; payload: { workflow: MiniWorkflow; scope?: "global" | "project"; cwd?: string } }
   | { type: "miniworkflow.delete"; payload: { workflowId: string; scope?: "global" | "project" | "both"; cwd?: string } }

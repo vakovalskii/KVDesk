@@ -21,6 +21,7 @@ type DistillPanelProps = {
   activeSessionId: string | null;
   activeSessionCwd?: string;
   onClose: () => void;
+  onCancel?: () => void;
   onSave: (workflow: MiniWorkflow, status: "published" | "draft") => void;
   onRetry: (validationErrors: string[]) => void;
   onSetWorkflow: (wf: MiniWorkflow) => void;
@@ -354,6 +355,7 @@ export default function DistillPanel({
   activeSessionId,
   activeSessionCwd,
   onClose,
+  onCancel,
   onSave,
   onRetry,
   onSetWorkflow,
@@ -408,6 +410,9 @@ export default function DistillPanel({
             {distillLoading && (
               <div className="rounded-lg border border-ink-900/10 bg-surface p-4 text-sm text-ink-700 space-y-3">
                 <div className="font-medium">Анализирую сессию...</div>
+                <div className="text-xs text-ink-400 leading-relaxed">
+                  Дистилляция — многоступенчатый процесс: агент анализирует историю, выделяет переменные, строит цепочку шагов и верифицирует результат. В зависимости от объёма чата и скорости LLM это может занять 10–20 минут и более.
+                </div>
                 {distillProgress && (
                   <>
                     <div className="flex items-center gap-2">
@@ -428,6 +433,14 @@ export default function DistillPanel({
                       </div>
                     )}
                   </>
+                )}
+                {onCancel && (
+                  <button
+                    className="mt-2 rounded-lg border border-ink-900/10 px-3 py-1.5 text-xs text-ink-600 hover:bg-ink-100"
+                    onClick={onCancel}
+                  >
+                    Отменить
+                  </button>
                 )}
               </div>
             )}

@@ -45,6 +45,7 @@ import {
 } from "../agent/libs/distill-service.js";
 
 const miniWorkflowStore = new MiniWorkflowStore();
+const distillAbortControllers = new Map<string, AbortController>();
 
 function getDataDir(): string {
   return join(homedir(), ".valera");
@@ -1975,6 +1976,11 @@ async function handleClientEvent(event: ClientEvent) {
         return;
       }
 
+      // Create AbortController for this distillation
+      const distillAC = new AbortController();
+      distillAbortControllers.set(distillSessionId, distillAC);
+      const distillSignal = distillAC.signal;
+
       try {
         const distillUsage: DistillUsage = { input_tokens: 0, output_tokens: 0 };
         const chainResult = await distillChain({
@@ -1988,7 +1994,7 @@ async function handleClientEvent(event: ClientEvent) {
             type: "miniworkflow.distill.progress",
             payload: { sessionId: distillSessionId, step, totalSteps, label, usage: { ...usage } }
           } as any);
-        });
+        }, distillSignal);
 
         Object.assign(distillUsage, chainResult.usage);
 
@@ -2023,6 +2029,7 @@ async function handleClientEvent(event: ClientEvent) {
           const TOTAL_STEPS = 5 + MAX_VERIFY_CYCLES * 3;
 
           for (let cycle = 0; cycle < MAX_VERIFY_CYCLES; cycle++) {
+            if (distillSignal.aborted) break;
             const cycleBase = 5 + cycle * 3;
 
             emit({
@@ -2108,8 +2115,25 @@ async function handleClientEvent(event: ClientEvent) {
           } as any);
         }
       } catch (err) {
-        console.error("[Distill] Error:", err);
-        emit({ type: "miniworkflow.error", payload: { message: `Distill failed: ${String(err)}` } } as any);
+        if (distillSignal.aborted) {
+          console.log("[Distill] Cancelled by user");
+          emit({ type: "miniworkflow.distill.result", payload: { sessionId: distillSessionId, result: { status: "cancelled" } } } as any);
+        } else {
+          console.error("[Distill] Error:", err);
+          emit({ type: "miniworkflow.error", payload: { message: `Distill failed: ${String(err)}` } } as any);
+        }
+      } finally {
+        distillAbortControllers.delete(distillSessionId);
+      }
+      return;
+    }
+    case "miniworkflow.distill.cancel": {
+      const { sessionId: cancelSessionId } = (event as any).payload;
+      const ac = distillAbortControllers.get(cancelSessionId);
+      if (ac) {
+        ac.abort();
+        distillAbortControllers.delete(cancelSessionId);
+        console.log(`[Distill] Cancelled distillation for session ${cancelSessionId}`);
       }
       return;
     }

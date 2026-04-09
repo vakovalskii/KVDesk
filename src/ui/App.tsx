@@ -490,6 +490,10 @@ function App() {
           setDistillQuestions([]);
           setDistillError(`Ошибка обработки workflow: ${String(e)}`);
         }
+      } else if (result.status === "cancelled") {
+        setDistillWorkflow(null);
+        setDistillQuestions([]);
+        setDistillError(null);
       } else if (result.status === "needs_clarification") {
         setDistillWorkflow(null);
         setDistillQuestions(result.questions || []);
@@ -906,6 +910,16 @@ function App() {
     });
   }, [activeSessionId, sendEvent]);
 
+  const handleDistillCancel = useCallback(() => {
+    if (!distillSessionId) return;
+    sendEvent({
+      type: "miniworkflow.distill.cancel",
+      payload: { sessionId: distillSessionId }
+    });
+    setDistillLoading(false);
+    setDistillProgress(null);
+  }, [distillSessionId, sendEvent]);
+
   const hasToolUseInMessages = messages.some((m: any) => m?.type === "tool_use")
     || messages.some((m: any) => m?.type === "assistant" && Array.isArray(m?.message?.content) && m.message.content.some((c: any) => c?.type === "tool_use"));
   const canSaveMiniWorkflow = Boolean(
@@ -1224,6 +1238,7 @@ function App() {
           activeSessionId={distillSessionId}
           activeSessionCwd={activeSession?.cwd}
           onClose={() => {
+            if (distillLoading) handleDistillCancel();
             setDistillSessionId(null);
             setDistillWorkflow(null);
             setReplayVerification(null);
@@ -1231,6 +1246,7 @@ function App() {
             setVerifyCycles(null);
             setDistillDebugLogPath(null);
           }}
+          onCancel={distillLoading ? handleDistillCancel : undefined}
           onSave={(wf, status) => {
             sendEvent({
               type: "miniworkflow.save",

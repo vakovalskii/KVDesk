@@ -56,6 +56,7 @@ const schedulerStore = new SchedulerStore(sessions['db']); // Access the databas
 const runnerHandles = new Map<string, RunnerHandle>();
 const multiThreadTasks = new Map<string, MultiThreadTask>();
 const miniWorkflowStore = new MiniWorkflowStore();
+const distillAbortControllers = new Map<string, AbortController>();
 let suppressStreamEvents = false;
 
 app.on("ready", () => {
@@ -2279,6 +2280,10 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
     }
 
     // 3-step LLM distillation chain
+    const distillAC = new AbortController();
+    distillAbortControllers.set(sessionId, distillAC);
+    const distillSignal = distillAC.signal;
+
     try {
       const chainResult = await distillChain({
         sessionId,
@@ -2291,7 +2296,7 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
           type: "miniworkflow.distill.progress",
           payload: { sessionId, step, totalSteps, label, usage: { ...usage } }
         });
-      });
+      }, distillSignal);
 
       const distillUsage = chainResult.usage;
 
@@ -2337,6 +2342,7 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
         const TOTAL_STEPS = 5 + MAX_VERIFY_CYCLES * 3;
 
         for (let cycle = 0; cycle < MAX_VERIFY_CYCLES; cycle++) {
+          if (distillSignal.aborted) break;
           const cycleBase = 5 + cycle * 3;
           // Progress: full replay
           sessionManager.emitToWindow(windowId, {
@@ -2474,11 +2480,32 @@ export async function handleClientEvent(event: ClientEvent, windowId: number) {
         });
       }
     } catch (err) {
-      console.error("[Distill] Error:", err);
-      sessionManager.emitToWindow(windowId, {
-        type: "miniworkflow.error",
-        payload: { message: `Distill failed: ${String(err)}` }
-      });
+      if (distillSignal.aborted) {
+        console.log("[Distill] Cancelled by user");
+        sessionManager.emitToWindow(windowId, {
+          type: "miniworkflow.distill.result",
+          payload: { sessionId, result: { status: "cancelled" } }
+        });
+      } else {
+        console.error("[Distill] Error:", err);
+        sessionManager.emitToWindow(windowId, {
+          type: "miniworkflow.error",
+          payload: { message: `Distill failed: ${String(err)}` }
+        });
+      }
+    } finally {
+      distillAbortControllers.delete(sessionId);
+    }
+    return;
+  }
+
+  if (event.type === "miniworkflow.distill.cancel") {
+    const { sessionId: cancelSessionId } = event.payload as { sessionId: string };
+    const ac = distillAbortControllers.get(cancelSessionId);
+    if (ac) {
+      ac.abort();
+      distillAbortControllers.delete(cancelSessionId);
+      console.log(`[Distill] Cancelled distillation for session ${cancelSessionId}`);
     }
     return;
   }

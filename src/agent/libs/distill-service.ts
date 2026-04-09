@@ -153,7 +153,7 @@ export function redactDebugLog(log: DistillDebugLog): DistillDebugLog {
 
 export async function llmCall(
   client: OpenAI, modelName: string, system: string, user: string,
-  debugLog?: DistillDebugLog, debugStep?: string
+  debugLog?: DistillDebugLog, debugStep?: string, signal?: AbortSignal
 ): Promise<{ data: any; usage: { input_tokens: number; output_tokens: number } }> {
   const response = await client.chat.completions.create({
     model: modelName,
@@ -162,7 +162,7 @@ export async function llmCall(
       { role: "system", content: system },
       { role: "user", content: user }
     ]
-  });
+  }, { signal });
   const text = response.choices?.[0]?.message?.content || "";
   const jsonRaw = extractJsonObject(text);
   if (!jsonRaw) throw new Error("LLM returned non-JSON response");
@@ -185,13 +185,13 @@ export async function llmCallMultiTurn(
   client: OpenAI,
   modelName: string,
   messages: ChatMsg[],
-  debugLog?: DistillDebugLog, debugStep?: string
+  debugLog?: DistillDebugLog, debugStep?: string, signal?: AbortSignal
 ): Promise<{ data: any; usage: { input_tokens: number; output_tokens: number }; assistantMessage: string }> {
   const response = await client.chat.completions.create({
     model: modelName,
     temperature: 0.1,
     messages
-  });
+  }, { signal });
   const text = response.choices?.[0]?.message?.content || "";
   const jsonRaw = extractJsonObject(text);
   if (!jsonRaw) throw new Error("LLM returned non-JSON response");
@@ -319,10 +319,10 @@ export async function verifyTestRun(
   modelName: string,
   workflow: any,
   replayResult: ReplayResult,
-  debugLog?: DistillDebugLog, debugStep?: string
+  debugLog?: DistillDebugLog, debugStep?: string, signal?: AbortSignal
 ): Promise<VerifyResult> {
   const prompt = buildVerificationPrompt(workflow, replayResult);
-  const result = await llmCall(client, modelName, "Ответь JSON.", prompt, debugLog, debugStep);
+  const result = await llmCall(client, modelName, "Ответь JSON.", prompt, debugLog, debugStep, signal);
   return {
     match: Boolean(result.data.match),
     summary: String(result.data.summary || ""),
@@ -373,10 +373,10 @@ export async function refineWorkflowFromFeedback(
   workflow: any,
   verification: { discrepancies: string[]; suggestions: string[] },
   schemaRef: string,
-  debugLog?: DistillDebugLog, debugStep?: string
+  debugLog?: DistillDebugLog, debugStep?: string, signal?: AbortSignal
 ): Promise<any> {
   const prompt = buildRefinePrompt(workflow, verification, schemaRef);
-  const result = await llmCall(client, modelName, "Ответь JSON.", prompt, debugLog, debugStep);
+  const result = await llmCall(client, modelName, "Ответь JSON.", prompt, debugLog, debugStep, signal);
   return { ...result.data, usage: result.usage };
 }
 
@@ -384,7 +384,8 @@ export async function refineWorkflowFromFeedback(
 
 export async function distillChain(
   input: { sessionId: string; cwd?: string; history: any[]; model?: string; previousErrors?: string[] },
-  onProgress?: DistillProgressCallback
+  onProgress?: DistillProgressCallback,
+  signal?: AbortSignal
 ): Promise<DistillChainResult> {
   const { client, modelName } = getLlmConnection(input.model);
   const conciseHistory = buildConciseHistory(input.history as any);
@@ -410,7 +411,7 @@ export async function distillChain(
     client, modelName,
     DISTILL_STEP1_SYSTEM,
     buildDistillStep1User(input.sessionId, input.cwd || "", conciseHistory) + retryContext,
-    debugLog, "step1_identify_result"
+    debugLog, "step1_identify_result", signal
   );
   addUsage(step1r.usage);
   const step1 = step1r.data;
@@ -427,7 +428,7 @@ export async function distillChain(
     client, modelName,
     DISTILL_STEP2_SYSTEM,
     `Результат сессии:\n${JSON.stringify(step1)}`,
-    debugLog, "step2_extract_variables"
+    debugLog, "step2_extract_variables", signal
   );
   addUsage(step2r.usage);
   const step2 = step2r.data;
@@ -440,7 +441,7 @@ export async function distillChain(
     client, modelName,
     DISTILL_STEP3_SYSTEM,
     `Результат сессии:\n${JSON.stringify(step1)}\n\nВходные параметры (variables):\n${JSON.stringify(step2)}\n\nHistory JSON:\n${JSON.stringify(conciseHistory)}`,
-    debugLog, "step3_build_chain"
+    debugLog, "step3_build_chain", signal
   );
   addUsage(step3r.usage);
   const step3 = step3r.data;
@@ -455,7 +456,7 @@ export async function distillChain(
       client, modelName,
       DISTILL_STEP4_SYSTEM,
       buildDistillStep4User(step3.chain || [], step2.variables || [], conciseHistory),
-      debugLog, "step4_scriptify"
+      debugLog, "step4_scriptify", signal
     );
     addUsage(step4r.usage);
     step4 = step4r.data;
