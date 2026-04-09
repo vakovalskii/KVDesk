@@ -286,8 +286,15 @@ export function AppModals(props: AppModalsProps) {
   );
 }
 
-function App() {
+function I18nBridge({ tRef }: { tRef: React.MutableRefObject<(key: string, params?: Record<string, string | number>) => string> }) {
   const { t } = useI18n();
+  tRef.current = t;
+  return null;
+}
+
+function App() {
+  const tRef = useRef<(key: string, params?: Record<string, string | number>) => string>((key) => key);
+  const t = (...args: Parameters<typeof tRef.current>) => tRef.current(...args);
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const partialMessageRef = useRef("");
@@ -946,6 +953,7 @@ function App() {
       initialLocale={effectiveLocale}
       onLocaleChange={handleLocaleChange}
     >
+    <I18nBridge tRef={tRef} />
     <div className="flex h-screen bg-surface">
       <Sidebar
         connected={connected}
