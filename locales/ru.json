@@ -423,6 +423,12 @@
   "valeApps.run": "Запустить",
   "valeApps.createValeApp": "Создать Vale App",
   "valeApps.analyzing": "Анализ...",
+  "valeApps.hintOpenSession": "Откройте сессию",
+  "valeApps.hintAnalyzing": "Идёт анализ сессии...",
+  "valeApps.hintWaitSession": "Дождитесь завершения сессии",
+  "valeApps.hintNoToolCalls": "Нет вызовов инструментов в сессии",
+  "valeApps.deleteTitle": "Удалить workflow",
+  "valeApps.deleteConfirm": "Удалить workflow «{name}»? Это действие необратимо.",
 
   "distillConfig.title": "Настройки дистилляции",
   "distillConfig.model": "Модель",

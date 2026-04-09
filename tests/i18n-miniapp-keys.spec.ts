@@ -15,6 +15,12 @@ const MINIAPP_KEYS = [
   "valeApps.run",
   "valeApps.createValeApp",
   "valeApps.analyzing",
+  "valeApps.hintOpenSession",
+  "valeApps.hintAnalyzing",
+  "valeApps.hintWaitSession",
+  "valeApps.hintNoToolCalls",
+  "valeApps.deleteTitle",
+  "valeApps.deleteConfirm",
 
   // Distill config dialog
   "distillConfig.title",

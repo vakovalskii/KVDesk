@@ -370,7 +370,7 @@ export default function DistillPanel({
 }: DistillPanelProps) {
   const { t } = useI18n();
   return (
-    <div className="fixed inset-0 z-50 bg-ink-900/40 flex items-center justify-center p-4">
+    <div className="fixed inset-0 z-[80] bg-ink-900/40 flex items-center justify-center p-4">
       <div className="w-full max-w-[95vw] h-[90vh] rounded-xl border border-ink-900/10 bg-white shadow-xl flex overflow-hidden">
 
         {/* Left panel: chain steps (only when workflow loaded) */}

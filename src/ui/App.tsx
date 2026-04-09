@@ -939,13 +939,13 @@ function App() {
     !distillLoading
   );
   const saveMiniWorkflowHint = !activeSessionId
-    ? "Откройте сессию"
+    ? t("valeApps.hintOpenSession")
     : distillLoading
-      ? "Идет анализ сессии..."
+      ? t("valeApps.hintAnalyzing")
       : activeSession?.status === "running"
-      ? "Дождитесь завершения сессии"
+      ? t("valeApps.hintWaitSession")
       : !hasToolUseInMessages
-        ? "Нет вызовов инструментов в сессии"
+        ? t("valeApps.hintNoToolCalls")
         : undefined;
 
   return (
@@ -1057,7 +1057,7 @@ function App() {
       </main>
 
       <aside
-        className={`fixed inset-y-0 right-0 z-[70] w-[320px] border-l border-ink-900/10 bg-[#FAF9F6] px-3 pt-3 pb-3 overflow-y-auto transition-transform duration-200 ease-out ${
+        className={`fixed inset-y-0 right-0 z-[70] w-[320px] border-l border-ink-900/10 bg-[#FAF9F6] px-3 pt-3 pb-3 flex flex-col overflow-y-auto transition-transform duration-200 ease-out ${
           showWorkflowPanel ? "translate-x-0" : "translate-x-full pointer-events-none"
         }`}
       >
@@ -1094,7 +1094,12 @@ function App() {
                 <div key={wf.id} className="rounded-lg border border-ink-900/10 bg-white p-3">
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-medium text-ink-800">{wf.icon} {wf.name}</div>
+                      <div className="truncate text-sm font-medium text-ink-800">
+                        {wf.icon} {wf.name}
+                        {(wf as any).status === "draft" && (
+                          <span className="ml-1.5 px-1 py-0.5 rounded text-[9px] font-medium bg-amber-100 text-amber-700">draft</span>
+                        )}
+                      </div>
                       <div className="text-[11px] text-muted">v{wf.version} - inputs: {wf.inputs_count}</div>
                     </div>
                     <div className="relative">
@@ -1112,6 +1117,7 @@ function App() {
                               setPendingWorkflowAction("edit");
                               sendEvent({ type: "miniworkflow.get", payload: { workflowId: wf.id, cwd: activeSession?.cwd } });
                               setOpenWorkflowMenuId(null);
+                              setShowWorkflowPanel(false);
                             }}
                           >
                             {t("valeApps.edit")}
@@ -1154,6 +1160,21 @@ function App() {
               ))}
             </div>
           )}
+          {/* Create Vale App button at bottom */}
+          <div className="mt-auto pt-3 border-t border-ink-900/10">
+            <button
+              className={`w-full rounded-lg px-3 py-2 text-xs font-medium transition-colors ${
+                canSaveMiniWorkflow
+                  ? "border border-accent/30 bg-accent/10 text-accent hover:bg-accent/20"
+                  : "border border-ink-900/10 bg-ink-900/5 text-muted cursor-not-allowed"
+              }`}
+              disabled={!canSaveMiniWorkflow}
+              onClick={() => { if (canSaveMiniWorkflow) setShowDistillConfig(true); }}
+              title={canSaveMiniWorkflow ? t("valeApps.createValeApp") : saveMiniWorkflowHint}
+            >
+              {distillLoading ? t("valeApps.analyzing") : t("valeApps.createValeApp")}
+            </button>
+          </div>
       </aside>
 
       <AppModals
@@ -1190,7 +1211,7 @@ function App() {
       />
 
       {showDistillConfig && (
-        <div className="fixed inset-0 z-50 bg-ink-900/40 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[80] bg-ink-900/40 flex items-center justify-center p-4">
           <div className="w-full max-w-md rounded-xl border border-ink-900/10 bg-white shadow-xl p-6 space-y-4">
             <h3 className="text-sm font-semibold text-ink-800">{t("distillConfig.title")}</h3>
             <label className="block text-xs text-ink-700">
@@ -1292,7 +1313,7 @@ function App() {
       )}
 
       {runWorkflow && (
-        <div className="fixed inset-0 z-50 bg-ink-900/40 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[80] bg-ink-900/40 flex items-center justify-center p-4">
           <div className="w-full max-w-lg rounded-xl border border-ink-900/10 bg-white p-4 shadow-xl">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-ink-800">{t("runWorkflow.title", { name: runWorkflow.name })}</h3>
@@ -1387,18 +1408,18 @@ function App() {
       )}
 
       {deleteWorkflowCandidate && (
-        <div className="fixed inset-0 z-50 bg-ink-900/40 flex items-center justify-center p-4">
+        <div className="fixed inset-0 z-[80] bg-ink-900/40 flex items-center justify-center p-4">
           <div className="w-full max-w-md rounded-xl border border-ink-900/10 bg-white p-4 shadow-xl">
-            <h3 className="text-sm font-semibold text-ink-800">Удалить workflow</h3>
+            <h3 className="text-sm font-semibold text-ink-800">{t("valeApps.deleteTitle")}</h3>
             <p className="mt-2 text-sm text-ink-700">
-              Удалить workflow "{deleteWorkflowCandidate.name}"? Это действие необратимо.
+              {t("valeApps.deleteConfirm", { name: deleteWorkflowCandidate.name })}
             </p>
             <div className="mt-4 flex justify-end gap-2">
               <button
                 className="rounded-lg border border-ink-900/10 px-3 py-1.5 text-xs text-ink-700 hover:bg-ink-100"
                 onClick={() => setDeleteWorkflowCandidate(null)}
               >
-                Отмена
+                {t("distillConfig.cancel")}
               </button>
               <button
                 className="rounded-lg bg-error px-3 py-1.5 text-xs text-white hover:bg-error/90"
@@ -1410,7 +1431,7 @@ function App() {
                   setDeleteWorkflowCandidate(null);
                 }}
               >
-                Удалить
+                {t("valeApps.delete")}
               </button>
             </div>
           </div>

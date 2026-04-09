@@ -423,6 +423,12 @@
   "valeApps.run": "Run",
   "valeApps.createValeApp": "Create Vale App",
   "valeApps.analyzing": "Analyzing...",
+  "valeApps.hintOpenSession": "Open a session first",
+  "valeApps.hintAnalyzing": "Session analysis in progress...",
+  "valeApps.hintWaitSession": "Wait for session to complete",
+  "valeApps.hintNoToolCalls": "No tool calls in session",
+  "valeApps.deleteTitle": "Delete workflow",
+  "valeApps.deleteConfirm": "Delete workflow \"{name}\"? This action is irreversible.",
 
   "distillConfig.title": "Distillation Settings",
   "distillConfig.model": "Model",
