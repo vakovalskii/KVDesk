@@ -1179,7 +1179,7 @@ function App() {
               >
                 <option value="">Модель сессии ({activeSession?.model?.split("::").pop() || "default"})</option>
                 {llmModels.filter(m => m.enabled !== false).map(m => (
-                  <option key={m.id} value={m.id}>{m.name} ({m.providerType})</option>
+                  <option key={m.id} value={m.id}>{m.name} ({llmProviders.find(p => p.id === m.providerId)?.name || m.providerType})</option>
                 ))}
               </select>
             </label>
