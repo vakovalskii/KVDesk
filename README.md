@@ -1,6 +1,6 @@
 <div align="center">
 
-# ValeDesk
+# KVDesk
 
 **Versatile Almost Local, Eventually Reasonable Assistant**
 
