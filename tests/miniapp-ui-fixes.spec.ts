@@ -85,8 +85,8 @@ describe("Mini-app UI fixes", () => {
     it("workflow card shows draft badge when status is draft", () => {
       const src = readSrc("src/ui/App.tsx");
       expect(src).toContain('"draft"');
-      // Check for the draft badge span
-      expect(src).toMatch(/status.*===.*"draft"[\s\S]*?draft<\/span>/);
+      expect(src).toContain('valeApps.draftBadge');
+      expect(src).toMatch(/status.*===.*"draft"/);
     });
   });
 

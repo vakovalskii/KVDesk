@@ -83,6 +83,12 @@ export function createWebPlatform(): PlatformAdapter {
             return mockPath;
         },
 
+        selectFile: async () => {
+            const mockPath = "/mock/web/path/file.txt";
+            console.log("[web-platform] selectFile - returning mock path:", mockPath);
+            return mockPath;
+        },
+
         invoke: async <TResult = unknown>(channel: string, ...args: unknown[]): Promise<TResult> => {
             console.log(`[web-platform] invoke "${channel}"`, args);
 

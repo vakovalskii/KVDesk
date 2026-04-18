@@ -14,6 +14,7 @@ import { FileBrowser } from "./components/FileBrowser";
 import { PromptInput } from "./components/PromptInput";
 import { MessageCard } from "./components/EventCard";
 import DistillPanel from "./components/DistillPanel";
+import { WorkflowInputField } from "./components/WorkflowInputField";
 import { AppFooter } from "./components/AppFooter";
 import { TodoPanel } from "./components/TodoPanel";
 import MDContent from "./render/markdown";
@@ -539,6 +540,7 @@ function App() {
     }
     if (event.type === "miniworkflow.error") {
       setGlobalError(event.payload.message);
+      window.dispatchEvent(new CustomEvent("distill-error", { detail: event }));
     }
     if (event.type === "miniworkflow.replay.started") {
       const { sessionId } = event.payload;
@@ -1048,11 +1050,7 @@ function App() {
 
         <PromptInput
           sendEvent={sendEvent}
-          onSaveMiniWorkflow={handleDistillWorkflow}
-          canSaveMiniWorkflow={canSaveMiniWorkflow}
-          saveMiniWorkflowHint={saveMiniWorkflowHint}
           workflowPanelOpen={showWorkflowPanel}
-          saveMiniWorkflowLoading={distillLoading}
         />
       </main>
 
@@ -1090,14 +1088,28 @@ function App() {
                   const tags = (wf.tags || []).join(" ").toLowerCase();
                   return wf.name.toLowerCase().includes(q) || wf.description.toLowerCase().includes(q) || tags.includes(q);
                 })
-                .map((wf) => (
-                <div key={wf.id} className="rounded-lg border border-ink-900/10 bg-white p-3">
+                .map((wf) => {
+                  const isDraft = (wf as any).status === "draft";
+                  return (
+                <div
+                  key={wf.id}
+                  className={`rounded-lg border p-3 ${isDraft ? "border-ink-900/10 bg-ink-900/[0.02] opacity-80" : "border-ink-900/10 bg-white"}`}
+                >
                   <div className="flex items-center justify-between gap-2">
                     <div className="min-w-0">
-                      <div className="truncate text-sm font-medium text-ink-800">
+                      <div className={`truncate text-sm font-medium ${isDraft ? "text-ink-600" : "text-ink-800"}`}>
                         {wf.icon} {wf.name}
-                        {(wf as any).status === "draft" && (
-                          <span className="ml-1.5 px-1 py-0.5 rounded text-[9px] font-medium bg-amber-100 text-amber-700">draft</span>
+                        {isDraft && (
+                          <span
+                            className="ml-1.5 inline-flex items-center gap-0.5 px-1 py-0.5 rounded text-[9px] font-medium bg-amber-100 text-amber-700"
+                            title={t("valeApps.draftTooltip")}
+                          >
+                            <svg className="h-2.5 w-2.5" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                              <path d="M12 20h9" />
+                              <path d="M16.5 3.5a2.121 2.121 0 1 1 3 3L7 19l-4 1 1-4L16.5 3.5z" />
+                            </svg>
+                            {t("valeApps.draftBadge")}
+                          </span>
                         )}
                       </div>
                       <div className="text-[11px] text-muted">v{wf.version} - inputs: {wf.inputs_count}</div>
@@ -1146,18 +1158,33 @@ function App() {
                   </div>
                   <p className="mt-2 text-xs text-ink-600">{wf.description}</p>
                   <div className="mt-2 flex items-center justify-end">
-                    <button
-                      className="rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-xs text-accent hover:bg-accent/20"
-                      onClick={() => {
-                        setPendingWorkflowAction("run");
-                        sendEvent({ type: "miniworkflow.get", payload: { workflowId: wf.id, cwd: activeSession?.cwd } });
-                      }}
-                    >
-                      {t("valeApps.run")}
-                    </button>
+                    {isDraft ? (
+                      <button
+                        className="rounded-md border border-amber-300 bg-amber-50 px-2.5 py-1.5 text-xs text-amber-800 hover:bg-amber-100"
+                        title={t("valeApps.draftEditTooltip")}
+                        onClick={() => {
+                          setPendingWorkflowAction("edit");
+                          sendEvent({ type: "miniworkflow.get", payload: { workflowId: wf.id, cwd: activeSession?.cwd } });
+                          setShowWorkflowPanel(false);
+                        }}
+                      >
+                        {t("valeApps.edit")}
+                      </button>
+                    ) : (
+                      <button
+                        className="rounded-md border border-accent/30 bg-accent/10 px-2.5 py-1.5 text-xs text-accent hover:bg-accent/20"
+                        onClick={() => {
+                          setPendingWorkflowAction("run");
+                          sendEvent({ type: "miniworkflow.get", payload: { workflowId: wf.id, cwd: activeSession?.cwd } });
+                        }}
+                      >
+                        {t("valeApps.run")}
+                      </button>
+                    )}
                   </div>
                 </div>
-              ))}
+                );
+              })}
             </div>
           )}
           {/* Create Vale App button at bottom */}
@@ -1269,7 +1296,6 @@ function App() {
           activeSessionId={distillSessionId}
           activeSessionCwd={activeSession?.cwd}
           onClose={() => {
-            if (distillLoading) handleDistillCancel();
             setDistillSessionId(null);
             setDistillWorkflow(null);
             setReplayVerification(null);
@@ -1277,7 +1303,15 @@ function App() {
             setVerifyCycles(null);
             setDistillDebugLogPath(null);
           }}
-          onCancel={distillLoading ? handleDistillCancel : undefined}
+          onCancel={distillLoading ? () => {
+            handleDistillCancel();
+            setDistillSessionId(null);
+            setDistillWorkflow(null);
+            setReplayVerification(null);
+            setReplayArtifacts(null);
+            setVerifyCycles(null);
+            setDistillDebugLogPath(null);
+          } : undefined}
           onSave={(wf, status) => {
             sendEvent({
               type: "miniworkflow.save",
@@ -1345,39 +1379,14 @@ function App() {
               {runWorkflow.inputs.map((input) => (
                 <label key={input.id} className="block text-xs text-ink-700">
                   {input.title || input.id}
-                  {input.type === "boolean" ? (
-                    <div className="mt-1 flex items-center gap-2 rounded-lg border border-ink-900/10 px-2 py-1.5 bg-white">
-                      <input
-                        type="checkbox"
-                        checked={String(runInputs[input.id] ?? "").toLowerCase() === "true"}
-                        onChange={(e) => setRunInputs((prev) => ({ ...prev, [input.id]: String(e.target.checked) }))}
-                      />
-                      <span className="text-xs text-ink-600">{input.description || input.id}</span>
-                    </div>
-                  ) : input.type === "enum" && Array.isArray(input.enum_values) ? (
-                    <select
-                      className="mt-1 w-full rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
-                      value={runInputs[input.id] ?? ""}
-                      onChange={(e) => setRunInputs((prev) => ({ ...prev, [input.id]: e.target.value }))}
-                    >
-                      <option value="">{t("runWorkflow.selectValue")}</option>
-                      {input.enum_values.map((v) => <option key={v} value={v}>{v}</option>)}
-                    </select>
-                  ) : (
-                    <input
-                      type={
-                        input.type === "secret" ? "password"
-                          : input.type === "number" ? "number"
-                            : input.type === "date" ? "date"
-                              : input.type === "datetime" ? "datetime-local"
-                                : input.type === "url" ? "url"
-                                  : "text"
-                      }
-                      className="mt-1 w-full rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
-                      value={runInputs[input.id] ?? ""}
-                      onChange={(e) => setRunInputs((prev) => ({ ...prev, [input.id]: e.target.value }))}
-                    />
+                  {input.required && (
+                    <span className="ml-1 text-error">*</span>
                   )}
+                  <WorkflowInputField
+                    input={input}
+                    value={runInputs[input.id] ?? ""}
+                    onChange={(val) => setRunInputs((prev) => ({ ...prev, [input.id]: val }))}
+                  />
                 </label>
               ))}
             </div>

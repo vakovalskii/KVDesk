@@ -8,7 +8,7 @@ export type InputSpec = {
   id: string;
   title: string;
   description: string;
-  type: "string" | "text" | "number" | "boolean" | "enum" | "date" | "datetime" | "file_path" | "url" | "secret";
+  type: "string" | "text" | "number" | "boolean" | "enum" | "date" | "datetime" | "file_path" | "directory" | "url" | "secret";
   required: boolean;
   default?: unknown;
   enum_values?: string[];

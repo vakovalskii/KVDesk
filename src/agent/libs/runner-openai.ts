@@ -16,9 +16,9 @@ import { getInitialPrompt, getSystemPrompt } from "./prompt-loader.js";
 import { getTodosSummary, getTodos, setTodos, clearTodos } from "./tools/manage-todos-tool.js";
 import { ToolExecutor } from "./tools-executor.js";
 import type { FileChange } from "../types.js";
-import { writeFileSync, existsSync, mkdirSync } from "fs";
+import { writeFileSync, existsSync, mkdirSync, readFileSync } from "fs";
 import { isGitRepo, getRelativePath, getFileDiffStats } from "../git-utils.js";
-import { join } from "path";
+import { join, relative, resolve } from "path";
 import { homedir } from "os";
 
 export type RunnerOptions = {
@@ -1506,7 +1506,6 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
                   relativePath = getRelativePath(filePath, session.cwd);
                 } else {
                   // For non-git repos, use path relative to cwd
-                  const { relative } = require('path');
                   try {
                     relativePath = relative(session.cwd, filePath) || filePath;
                   } catch {
@@ -1532,10 +1531,8 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
                 } else {
                   // For non-git repos without diffSnapshot, try to count lines from file
                   try {
-                    const { readFile } = require('fs');
-                    const { resolve } = require('path');
                     const fullFilePath = resolve(session.cwd, filePath);
-                    const content = readFile(fullFilePath, 'utf-8');
+                    const content = readFileSync(fullFilePath, 'utf-8');
                     const lineCount = content.split('\n').length;
                     // For write_file, all lines are additions
                     if (toolName === 'write_file') {

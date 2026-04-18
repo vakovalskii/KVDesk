@@ -30,7 +30,9 @@ Each input is a parameter the user fills before running the workflow.
 { id, title, description, type, required, default?, enum_values?, redaction? }
 ```
 
-- `type`: "string" | "text" | "number" | "boolean" | "enum" | "date" | "datetime" | "file_path" | "url" | "secret"
+- `type`: "string" | "text" | "number" | "boolean" | "enum" | "date" | "datetime" | "file_path" | "directory" | "url" | "secret"
+  - use `file_path` for a single file, `directory` for a folder (both get a native file picker in the UI)
+  - use `text` for multi-line input (renders as textarea), `string` for single-line
 - `redaction: true` — value is masked (for tokens/keys)
 - Templates reference inputs as `{{inputs.<id>}}`
 

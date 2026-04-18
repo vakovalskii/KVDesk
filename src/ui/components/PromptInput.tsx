@@ -11,11 +11,7 @@ const MAX_HEIGHT = MAX_ROWS * LINE_HEIGHT;
 
 interface PromptInputProps {
   sendEvent: (event: ClientEvent) => void;
-  onSaveMiniWorkflow?: () => void;
-  canSaveMiniWorkflow?: boolean;
-  saveMiniWorkflowHint?: string;
   workflowPanelOpen?: boolean;
-  saveMiniWorkflowLoading?: boolean;
 }
 
 export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
@@ -105,7 +101,7 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void) {
   return { prompt, setPrompt, isRunning, handleSend, handleStop, handleStartFromModal };
 }
 
-export function PromptInput({ sendEvent, onSaveMiniWorkflow, canSaveMiniWorkflow = false, saveMiniWorkflowHint, workflowPanelOpen = false, saveMiniWorkflowLoading = false }: PromptInputProps) {
+export function PromptInput({ sendEvent, workflowPanelOpen = false }: PromptInputProps) {
   const { t } = useI18n();
   const { prompt, setPrompt, isRunning, handleSend, handleStop } = usePromptActions(sendEvent);
   const promptRef = useRef<HTMLTextAreaElement | null>(null);
@@ -164,20 +160,6 @@ export function PromptInput({ sendEvent, onSaveMiniWorkflow, canSaveMiniWorkflow
     <section className={`fixed bottom-0 left-0 bg-gradient-to-t from-surface via-surface to-transparent pb-6 px-2 lg:pb-8 pt-8 lg:ml-[280px] ${workflowPanelOpen ? "right-[320px]" : "right-0"}`}>
       <div className="mx-auto w-full max-w-full">
         <div className="flex w-full items-end gap-3 rounded-2xl border border-ink-900/10 bg-surface px-4 py-3 shadow-card">
-          <button
-            type="button"
-            className={`shrink-0 rounded-lg border px-2.5 py-2 text-xs font-medium transition-colors ${
-              canSaveMiniWorkflow
-                ? "border-accent/30 bg-accent/10 text-accent hover:bg-accent/20"
-                : "cursor-not-allowed border-ink-900/10 bg-ink-900/5 text-muted"
-            }`}
-            onClick={() => {
-              if (canSaveMiniWorkflow) onSaveMiniWorkflow?.();
-            }}
-            title={canSaveMiniWorkflow ? t("valeApps.createValeApp") : saveMiniWorkflowHint}
-          >
-            {saveMiniWorkflowLoading ? t("valeApps.analyzing") : t("valeApps.createValeApp")}
-          </button>
           <textarea
             rows={1}
             className="flex-1 resize-none bg-transparent py-1.5 text-sm text-ink-800 placeholder:text-muted focus:outline-none"

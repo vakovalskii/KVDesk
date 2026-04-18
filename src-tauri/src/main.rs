@@ -1125,6 +1125,12 @@ fn select_directory() -> Result<Option<String>, String> {
 }
 
 #[tauri::command]
+fn select_file() -> Result<Option<String>, String> {
+  let picked = rfd::FileDialog::new().pick_file();
+  Ok(picked.map(|p| p.to_string_lossy().to_string()))
+}
+
+#[tauri::command]
 fn generate_session_title(user_input: Option<String>) -> Result<String, String> {
   let input = user_input.unwrap_or_default();
   let trimmed = input.trim();
@@ -1348,6 +1354,28 @@ fn client_event(app: tauri::AppHandle, state: tauri::State<'_, AppState>, event:
         emit_server_event_app(
           &app,
           &json!({ "type": "runner.error", "payload": { "message": format!("Failed to open external URL: {error}") } }),
+        )?;
+      }
+      Ok(())
+    }
+
+    "open.path" => {
+      let payload = event
+        .get("payload")
+        .and_then(|v| v.as_object())
+        .ok_or_else(|| "[client_event] open.path payload is missing/invalid".to_string())?;
+      let path = payload
+        .get("path")
+        .and_then(|v| v.as_str())
+        .ok_or_else(|| "[client_event] open.path payload.path is missing".to_string())?;
+      let trimmed = path.trim();
+      if trimmed.is_empty() {
+        return Ok(());
+      }
+      if let Err(error) = open_target(trimmed) {
+        emit_server_event_app(
+          &app,
+          &json!({ "type": "runner.error", "payload": { "message": format!("Failed to open path: {error}") } }),
         )?;
       }
       Ok(())
@@ -2278,6 +2306,7 @@ fn main() {
       open_file,
       get_build_info,
       select_directory,
+      select_file,
       generate_session_title,
       get_recent_cwds,
       // Code Sandbox commands

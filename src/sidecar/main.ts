@@ -47,6 +47,14 @@ import {
 const miniWorkflowStore = new MiniWorkflowStore();
 const distillAbortControllers = new Map<string, AbortController>();
 
+async function safeRmDir(dir: string): Promise<void> {
+  try {
+    await fs.rm(dir, { recursive: true, force: true, maxRetries: 5, retryDelay: 200 });
+  } catch (err) {
+    console.warn(`[safeRmDir] Failed to remove ${dir}: ${(err as Error).message}`);
+  }
+}
+
 function getDataDir(): string {
   return join(homedir(), ".valera");
 }
@@ -1384,7 +1392,7 @@ async function runFullReplay(
 ): Promise<FullReplayResult> {
   const silent = options?.silent ?? false;
 
-  await fs.rm(workspaceDir, { recursive: true, force: true });
+  await safeRmDir(workspaceDir);
   await fs.mkdir(workspaceDir, { recursive: true });
 
   const inputs: Record<string, unknown> = {};
@@ -1923,14 +1931,23 @@ async function handleClientEvent(event: ClientEvent) {
     }
     case "miniworkflow.archive": {
       const { workflowId: archId, cwd: archCwd } = (event as any).payload;
-      const wfToArch = await miniWorkflowStore.load(archId, { projectCwd: archCwd, preferProject: true });
+      // Detect actual source scope: check project first, fall back to global
+      let sourceScope: "global" | "project" = "global";
+      let wfToArch = null;
+      if (archCwd) {
+        wfToArch = await miniWorkflowStore.load(archId, { baseDir: archCwd });
+        if (wfToArch) sourceScope = "project";
+      }
+      if (!wfToArch) {
+        wfToArch = await miniWorkflowStore.load(archId);
+      }
       if (!wfToArch) {
         emit({ type: "miniworkflow.error", payload: { message: `Workflow not found: ${archId}` } } as any);
         return;
       }
       await miniWorkflowStore.save(
         { ...wfToArch, status: "archived", updated_at: new Date().toISOString() },
-        { scope: archCwd ? "project" : "global", projectCwd: archCwd }
+        { scope: sourceScope, projectCwd: archCwd }
       );
       const afterArchive = await miniWorkflowStore.list({ projectCwd: archCwd, includeProject: Boolean(archCwd) });
       emit({ type: "miniworkflow.list", payload: { workflows: afterArchive } } as any);
@@ -2254,7 +2271,7 @@ async function handleClientEvent(event: ClientEvent) {
       const firstInputValue = Object.values(inputs).find((v) => typeof v === "string" && String(v).trim().length > 0);
 
       const workflowDir = join(replayWorkflow.source_session_cwd || replayCwd || ".", ".valera", "workflows", replayWorkflow.id, "workspace");
-      await fs.rm(workflowDir, { recursive: true, force: true });
+      await safeRmDir(workflowDir);
       await fs.mkdir(workflowDir, { recursive: true });
 
       const session = sessions.createSession({
