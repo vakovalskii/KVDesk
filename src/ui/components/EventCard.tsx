@@ -22,6 +22,16 @@ type ToolStatus = "pending" | "success" | "error";
 const toolStatusMap = new Map<string, ToolStatus>();
 const toolStatusListeners = new Set<() => void>();
 const MAX_VISIBLE_LINES = 3;
+type MiniAppStepResultMessage = Extract<StreamMessage, { type: "miniapp_step_result" }>;
+
+function extractReferencedPaths(text: string): string[] {
+  return Array.from(new Set(
+    text
+      .split("\n")
+      .map((line) => line.trim().replace(/^-\s*/, ""))
+      .filter((line) => !!line && !/\s/.test(line) && /[./\\]/.test(line))
+  ));
+}
 
 type AskUserQuestionInput = {
   questions?: Array<{
@@ -172,6 +182,23 @@ export function isMarkdown(text: string): boolean {
   return patterns.some((pattern) => pattern.test(text));
 }
 
+function looksLikeStructuredData(text: string): boolean {
+  const trimmed = text.trim();
+  if (!trimmed) return false;
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    return true;
+  }
+  return /"\w+"\s*:/.test(trimmed) && (trimmed.includes("{") || trimmed.includes("["));
+}
+
+function formatStructuredData(text: string): string {
+  try {
+    return JSON.stringify(JSON.parse(text), null, 2);
+  } catch {
+    return text;
+  }
+}
+
 function extractTagContent(input: string, tag: string): string | null {
   const match = input.match(new RegExp(`<${tag}>([\\s\\S]*?)</${tag}>`));
   return match ? match[1] : null;
@@ -239,6 +266,9 @@ const ToolResult = ({ messageContent }: { messageContent: ToolResultContent }) =
 const AssistantBlockCard = ({ title, text, showIndicator = false, isTextBlock = false }: { title: string; text: string; showIndicator?: boolean; isTextBlock?: boolean }) => {
   const { t } = useI18n();
   const [copied, setCopied] = useState(false);
+  const structuredData = isTextBlock && looksLikeStructuredData(text);
+  const formattedStructuredData = structuredData ? formatStructuredData(text) : text;
+  const shouldCollapseStructured = structuredData && formattedStructuredData.length > 120;
 
   const handleCopy = async () => {
     try {
@@ -256,7 +286,29 @@ const AssistantBlockCard = ({ title, text, showIndicator = false, isTextBlock = 
         <StatusDot variant="success" isActive={showIndicator} isVisible={showIndicator} />
         {title}
       </div>
-      <MDContent text={text} />
+      {shouldCollapseStructured ? (
+        <details className="group mt-1 overflow-hidden rounded-xl border border-ink-900/10 bg-surface-secondary">
+          <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2 text-left text-sm text-ink-700 transition-colors hover:bg-ink-900/5">
+            <span className="flex-1 truncate">Step output</span>
+            <svg className="h-3.5 w-3.5 flex-shrink-0 text-ink-400 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+            </svg>
+          </summary>
+          <div className="border-t border-ink-900/10 px-4 py-3">
+            <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg bg-ink-950 px-3 py-2 text-xs text-ink-50">
+              <code>{formattedStructuredData}</code>
+            </pre>
+          </div>
+        </details>
+      ) : structuredData ? (
+        <div className="mt-1 rounded-xl border border-ink-900/10 bg-surface-secondary p-3">
+          <pre className="overflow-x-auto whitespace-pre-wrap break-words rounded-lg bg-ink-950 px-3 py-2 text-xs text-ink-50">
+            <code>{formattedStructuredData}</code>
+          </pre>
+        </div>
+      ) : (
+        <MDContent text={text} />
+      )}
       {isTextBlock && (
         <button
           onClick={handleCopy}
@@ -273,6 +325,91 @@ const AssistantBlockCard = ({ title, text, showIndicator = false, isTextBlock = 
           {copied ? t("eventCard.copied") : t("eventCard.copy")}
         </button>
       )}
+    </div>
+  );
+};
+
+const MiniAppStepResultCard = ({
+  message,
+  showIndicator = false,
+  defaultOpen = false,
+  sessionId
+}: {
+  message: MiniAppStepResultMessage;
+  showIndicator?: boolean;
+  defaultOpen?: boolean;
+  sessionId?: string;
+}) => {
+  const structuredData = Boolean(message.fullText && looksLikeStructuredData(message.fullText));
+  const formattedStructuredData = structuredData && message.fullText ? formatStructuredData(message.fullText) : message.fullText || "";
+  const bodyText = structuredData ? formattedStructuredData : (message.fullText || message.summary);
+  const label = message.stepIndex && message.totalSteps
+    ? `Step ${message.stepIndex}/${message.totalSteps}`
+    : "Step result";
+  const sessions = useAppStore((state) => state.sessions);
+  const cwd = sessionId ? sessions[sessionId]?.cwd : undefined;
+  const inlinePaths = extractReferencedPaths(bodyText);
+  const allPaths = Array.from(new Set([...(message.artifactPaths || []), ...inlinePaths]));
+  const openArtifact = (artifactPath: string) => {
+    const resolvedPath = cwd && !/^[A-Za-z]:[\\/]/.test(artifactPath) && !artifactPath.startsWith("/") ? `${cwd.replace(/[\\/]+$/, "")}/${artifactPath.replace(/^[\\/]+/, "")}` : artifactPath;
+    const previewEvent = new CustomEvent("valedesk:preview-file", {
+      detail: {
+        path: resolvedPath,
+        cwd
+      }
+    });
+    window.dispatchEvent(previewEvent);
+  };
+
+  return (
+    <div className="flex flex-col gap-2 mt-4 overflow-hidden">
+      <div className="header text-accent flex items-center gap-2">
+        <StatusDot variant={message.status === "failed" ? "error" : "success"} isActive={showIndicator} isVisible={true} />
+        {label}
+      </div>
+      <details className="group overflow-hidden rounded-xl border border-ink-900/10 bg-surface-secondary" open={message.status === "failed" || defaultOpen}>
+        <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2 text-left text-sm text-ink-700 transition-colors hover:bg-ink-900/5">
+          <span className="flex-1 truncate">{message.title}</span>
+          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${message.status === "failed" ? "bg-error/10 text-error" : "bg-success/10 text-success"}`}>
+            {message.status}
+          </span>
+          <svg className="h-3.5 w-3.5 flex-shrink-0 text-ink-400 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+            <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+          </svg>
+        </summary>
+        <div className="border-t border-ink-900/10 px-4 py-3">
+          <div className="text-sm text-ink-700 whitespace-pre-wrap break-words">{message.summary}</div>
+          {allPaths.length > 0 && (
+            <div className="mt-3 flex flex-wrap gap-2">
+              {allPaths.map((artifactPath) => (
+                <button
+                  type="button"
+                  key={artifactPath}
+                  onClick={(event) => {
+                    event.preventDefault();
+                    event.stopPropagation();
+                    openArtifact(artifactPath);
+                  }}
+                  className="rounded-md border border-ink-900/10 bg-white px-2 py-1 text-[11px] text-ink-600 transition-colors hover:border-ink-900/20 hover:bg-ink-100 hover:text-accent"
+                >
+                  {artifactPath}
+                </button>
+              ))}
+            </div>
+          )}
+          {bodyText && (
+            structuredData ? (
+              <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words rounded-lg bg-ink-950 px-3 py-2 text-xs text-ink-50">
+                <code>{bodyText}</code>
+              </pre>
+            ) : (
+              <div className="mt-3 rounded-lg bg-white/70 px-3 py-2 text-xs text-ink-700 whitespace-pre-wrap break-words max-h-[320px] overflow-auto">
+                {bodyText}
+              </div>
+            )
+          )}
+        </div>
+      </details>
     </div>
   );
 };
@@ -520,15 +657,30 @@ const SystemInfoCard = ({ message, showIndicator = false }: { message: SDKMessag
 
   if (systemMsg.subtype === "notice") {
     const noticeText = systemMsg.text || systemMsg.message || t("eventCard.systemNotice");
+    const noticeLines = String(noticeText).split("\n").filter(Boolean);
+    const previewLine = noticeLines[0] || noticeText;
+    const canExpand = noticeLines.length > 1 || String(noticeText).length > 120;
     return (
       <div className="flex flex-col gap-2">
         <div className="header text-accent flex items-center gap-2">
           <StatusDot variant="success" isActive={showIndicator} isVisible={showIndicator} />
           {t("eventCard.systemNotice")}
         </div>
-        <div className="rounded-xl px-4 py-2 border border-ink-900/10 bg-surface-secondary text-sm text-ink-700">
-          {noticeText}
-        </div>
+        {canExpand ? (
+          <details className="group overflow-hidden rounded-xl border border-ink-900/10 bg-surface-secondary">
+            <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2 text-left text-sm text-ink-700 transition-colors hover:bg-ink-900/5">
+              <span className="flex-1 truncate group-open:hidden">{previewLine}</span>
+              <span className="hidden flex-1 whitespace-pre-wrap group-open:block">{noticeText}</span>
+              <svg className="h-3.5 w-3.5 flex-shrink-0 text-ink-400 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+                <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M19 9l-7 7-7-7" />
+              </svg>
+            </summary>
+          </details>
+        ) : (
+          <div className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-2 text-sm text-ink-700">
+            {noticeText}
+          </div>
+        )}
       </div>
     );
   }
@@ -743,6 +895,14 @@ export function MessageCard({
 }) {
   const { t } = useI18n();
   const showIndicator = isLast && isRunning;
+
+  if (message.type === "miniapp_step_progress") {
+    return null;
+  }
+
+  if (message.type === "miniapp_step_result") {
+    return <MiniAppStepResultCard message={message} showIndicator={showIndicator} defaultOpen={isLast} sessionId={sessionId} />;
+  }
 
   if (message.type === "user_prompt") {
     return <UserMessageCard 

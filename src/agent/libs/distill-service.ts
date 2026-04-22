@@ -58,6 +58,7 @@ export interface ReplayResult {
   stepResults: Record<string, string>;   // all step outputs (scripts + LLM)
   scriptErrors: Record<string, string>;  // errors from script steps only
   filesCreated: string[];                // files in workspace after replay
+  inputs?: Record<string, unknown>;      // actual inputs used for this replay
 }
 
 export interface VerifyResult {
@@ -279,6 +280,16 @@ export async function testRunScripts(workflow: any, workspaceDir: string): Promi
 export function buildVerificationPrompt(workflow: any, replayResult: ReplayResult): string {
   const sourceResult = workflow.source_result;
   const hasErrors = Object.keys(replayResult.scriptErrors).length > 0;
+  const replayInputs = replayResult.inputs || {};
+  const MAX_VERIFY_STEP_RESULT_CHARS = 12_000;
+  const stepResultsText = Object.entries(replayResult.stepResults)
+    .map(([id, out]) => {
+      const rendered = out.length > MAX_VERIFY_STEP_RESULT_CHARS
+        ? `${out.slice(0, MAX_VERIFY_STEP_RESULT_CHARS)}\n...(truncated for verifier context)`
+        : out;
+      return `### ${id}\n${rendered}`;
+    })
+    .join("\n\n");
 
   return `Ты агент-ревьювер. Сравни результат полного прогона мини-приложения с ожидаемым результатом.
 
@@ -290,16 +301,22 @@ ${sourceResult.requirements ? `- Требования: ${sourceResult.requiremen
 
 Критерии приёмки: ${workflow.validation?.acceptance_criteria || workflow.definition_of_done || "не заданы"}
 
+Параметры текущего запуска:
+${Object.keys(replayInputs).length > 0
+    ? Object.entries(replayInputs).map(([key, value]) => `- ${key}: ${typeof value === "string" ? value : JSON.stringify(value)}`).join("\n")
+    : "не переданы"}
+
 Результат полного прогона:
 
 Ошибки скриптов: ${hasErrors ? JSON.stringify(replayResult.scriptErrors) : "нет"}
 
 Результаты всех шагов:
-${Object.entries(replayResult.stepResults).map(([id, out]) => `### ${id}\n${out.slice(0, 2000)}`).join("\n\n")}
+${stepResultsText}
 
 Файлы в workspace: ${replayResult.filesCreated.join(", ") || "нет файлов"}
 
 ИНСТРУКЦИИ:
+0. Результаты шагов выше могут быть КРАТКИМИ манифестами; полные артефакты ищи в workspace, особенно в папках с сохранёнными step outputs.
 1. Используй инструменты чтобы РЕАЛЬНО проверить артефакты: прочитай CSV файлы (read_file), посмотри PNG/изображения (attach_image), проверь содержимое.
 2. Не пиши "невозможно проверить по логу" — ты МОЖЕШЬ прочитать файлы и посмотреть картинки.
 3. Все файлы находятся в текущей рабочей директории.

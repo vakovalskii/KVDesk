@@ -13,6 +13,31 @@ export function WorkflowInputField({ input, value, onChange }: Props) {
   const { t } = useI18n();
   const [showSecret, setShowSecret] = useState(false);
 
+  if (input.type === "period") {
+    const [rawStart = "", rawEnd = ""] = String(value ?? "").split("/");
+    const updatePeriod = (nextStart: string, nextEnd: string) => {
+      onChange(nextStart || nextEnd ? `${nextStart}/${nextEnd}` : "");
+    };
+
+    return (
+      <div className="mt-1 flex items-center gap-2">
+        <input
+          type="date"
+          className="min-w-0 flex-1 rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
+          value={rawStart}
+          onChange={(e) => updatePeriod(e.target.value, rawEnd)}
+        />
+        <span className="text-xs text-ink-400">-</span>
+        <input
+          type="date"
+          className="min-w-0 flex-1 rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
+          value={rawEnd}
+          onChange={(e) => updatePeriod(rawStart, e.target.value)}
+        />
+      </div>
+    );
+  }
+
   if (input.type === "boolean") {
     return (
       <div className="mt-1 flex items-center gap-2 rounded-lg border border-ink-900/10 px-2 py-1.5 bg-white">

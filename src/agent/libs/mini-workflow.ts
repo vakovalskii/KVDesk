@@ -263,6 +263,8 @@ export const DISTILL_STEP3_SYSTEM = `Ты создаёшь мини-прилож
 3. Промпт шага должен быть ПОЛНОЙ инструкцией (не "продолжи", а конкретное задание)
 4. 3-7 шагов для типичной задачи
 5. Для каждого шага укажи какие tools нужны
+6. Если шаг производит большой список, JSON, таблицу, черновик отчёта или иной объёмный результат, заставляй его СОХРАНЯТЬ полный результат в файл в workspace и возвращать только краткий манифест с путями к файлам
+7. Следующие шаги должны опираться на файлы workspace как на источник истины для больших данных, а не на огромный inline-ответ предыдущего шага
 
 КРИТИЧЕСКИ ВАЖНО для prompt_template:
 - Промпт каждого шага должен описывать КОНКРЕТНОЕ ДЕЙСТВИЕ: скачать данные с API, обработать таблицу, построить график и т.д.
@@ -530,7 +532,7 @@ export function assembleWorkflow(
 
 export function validateWorkflow(workflow: Record<string, unknown>): { valid: boolean; errors: string[] } {
   const errors: string[] = [];
-  const VALID_INPUT_TYPES = ["string", "text", "number", "boolean", "enum", "date", "datetime", "file_path", "url", "secret"];
+  const VALID_INPUT_TYPES = ["string", "text", "number", "boolean", "enum", "date", "datetime", "period", "file_path", "directory", "url", "secret"];
   const VALID_EXECUTION_TYPES = ["llm", "script"];
   const VALID_SCRIPT_LANGUAGES = ["python", "javascript"];
 
@@ -659,8 +661,13 @@ export function buildStepPrompt(
     workflow.inputs.filter((i) => i.type === "secret" || i.redaction).map((i) => i.id)
   );
 
-  const ctx = buildTemplateContext(inputs, stepResults);
+const ctx = buildTemplateContext(inputs, stepResults);
   const expanded = renderTemplate(step.prompt_template, ctx);
+  const artifactInstructionBlock = `\nПравила вывода этого шага:
+- Если результат длинный, структурированный или нужен для следующих шагов/проверки, сохрани полный результат в файл в текущей рабочей директории (workspace).
+- Не вставляй огромные JSON, таблицы и длинные списки целиком в ответ.
+- В ответе дай короткий итог и обязательно перечисли точные пути файлов, которые создал или обновил.
+- Если в результатах предыдущих шагов указаны пути к файлам, считай что полная версия результата находится там; при необходимости прочитай эти файлы инструментами, а не полагайся только на preview.\n`;
 
   const isFirstStep = stepIndex === 0;
   const isLastStep = stepIndex === totalSteps - 1;
@@ -688,14 +695,18 @@ ${inputLines}
 ${constraintsText}
 Задача:
 ${expanded}
+${artifactInstructionBlock}
 
 Выполни ТОЛЬКО этот шаг.`;
   }
 
   // Subsequent steps: compact — task + previous results only
+  const MAX_PREV_STEP_RESULT_CHARS = 12_000;
   const prevResults = Object.entries(stepResults).map(([id, result]) => {
     const prevStep = workflow.chain.find(s => s.id === id);
-    const truncated = result.length > 2000 ? result.slice(0, 2000) + "\n...(truncated)" : result;
+    const truncated = result.length > MAX_PREV_STEP_RESULT_CHARS
+      ? result.slice(0, MAX_PREV_STEP_RESULT_CHARS) + "\n...(truncated)"
+      : result;
     return `### ${prevStep?.title || id}\n${truncated}`;
   }).join("\n\n");
 
@@ -710,7 +721,7 @@ ${expanded}
 ${prevResults}
 
 Задача:
-${expanded}${validationBlock}
+${expanded}${artifactInstructionBlock}${validationBlock}
 
 Выполни ТОЛЬКО этот шаг.`;
 }

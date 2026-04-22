@@ -442,8 +442,8 @@ export function SettingsModal({ onClose, onSave, currentSettings }: SettingsModa
         onClose();
       }}>
       <Dialog.Portal>
-        <Dialog.Overlay className="fixed inset-0 z-50 bg-black/30 backdrop-blur-sm" />
-        <Dialog.Content className="fixed left-1/2 top-1/2 z-50 -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[85vh] rounded-2xl border border-ink-900/10 bg-surface shadow-2xl flex flex-col overflow-hidden">
+        <Dialog.Overlay className="fixed inset-0 z-[90] bg-black/30 backdrop-blur-sm" />
+        <Dialog.Content className="fixed left-1/2 top-1/2 z-[90] -translate-x-1/2 -translate-y-1/2 w-full max-w-3xl max-h-[85vh] rounded-2xl border border-ink-900/10 bg-surface shadow-2xl flex flex-col overflow-hidden">
           <div className="flex-shrink-0 px-6 pt-6 pb-4 border-b border-ink-900/10">
             <Dialog.Title className="text-xl font-semibold text-ink-900">
               {t('settings.title')}

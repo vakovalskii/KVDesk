@@ -87,7 +87,36 @@ export type UserPromptMessage = {
   prompt: string;
 };
 
-export type StreamMessage = SDKMessage | UserPromptMessage;
+export type MiniAppStepProgressMessage = {
+  type: "miniapp_step_progress";
+  stepId?: string;
+  stepIndex?: number;
+  totalSteps?: number;
+  title: string;
+  text: string;
+};
+
+export type MiniAppStepResultMessage = {
+  type: "miniapp_step_result";
+  stepId: string;
+  stepIndex?: number;
+  totalSteps?: number;
+  title: string;
+  status: "success" | "failed";
+  summary: string;
+  fullText?: string;
+  artifactPaths?: string[];
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+  };
+};
+
+export type StreamMessage =
+  | SDKMessage
+  | UserPromptMessage
+  | MiniAppStepProgressMessage
+  | MiniAppStepResultMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 
@@ -190,7 +219,7 @@ export type ServerEvent =
   | { type: "miniworkflow.tests.result"; payload: { workflowId: string; passed: boolean; results: MiniWorkflowTestResult[] } }
   | { type: "miniworkflow.fix.result"; payload: { workflow: MiniWorkflow; attempt: number } }
   | { type: "miniworkflow.replay.started"; payload: { workflowId: string; sessionId: string } }
-  | { type: "miniworkflow.replay.verified"; payload: { workflowId: string; sessionId: string; verification: { match: boolean; summary: string; discrepancies: string[]; suggestions: string[] }; verifyCycles?: { used: number; max: number }; replayArtifacts?: { filesCreated: string[]; stepResults: Record<string, string>; workspaceDir?: string } } }
+  | { type: "miniworkflow.replay.verified"; payload: { workflowId: string; sessionId: string; source?: "runtime" | "editor_verify" | "distill"; verification: { match: boolean; summary: string; discrepancies: string[]; suggestions: string[] }; verifyCycles?: { used: number; max: number }; replayArtifacts?: { filesCreated: string[]; stepResults: Record<string, string>; workspaceDir?: string } } }
   | { type: "miniworkflow.refine.result"; payload: { sessionId: string; result: { status: "success"; message: string; workflow: MiniWorkflow } | { status: "error"; message: string } } }
   | { type: "miniworkflow.error"; payload: { message: string } }
   // Scheduler IPC (sidecar -> Rust)

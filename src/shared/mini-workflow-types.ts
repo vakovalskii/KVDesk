@@ -8,7 +8,7 @@ export type InputSpec = {
   id: string;
   title: string;
   description: string;
-  type: "string" | "text" | "number" | "boolean" | "enum" | "date" | "datetime" | "file_path" | "directory" | "url" | "secret";
+  type: "string" | "text" | "number" | "boolean" | "enum" | "date" | "datetime" | "period" | "file_path" | "directory" | "url" | "secret";
   required: boolean;
   default?: unknown;
   enum_values?: string[];
@@ -62,6 +62,22 @@ export type MiniWorkflow = {
   source_session_cwd?: string;
   source_model?: string;             // model used for distillation (providerId::modelId or plain modelId)
   source_context?: string;           // concise chat log from the distilled session (reference for editing)
+  debug_log_path?: string;           // keep debug log while workflow stays draft/testing
+  last_review_verification?: {
+    match: boolean;
+    summary: string;
+    discrepancies: string[];
+    suggestions: string[];
+  };
+  last_review_artifacts?: {
+    filesCreated: string[];
+    stepResults: Record<string, string>;
+    workspaceDir?: string;
+  };
+  last_review_cycles?: {
+    used: number;
+    max: number;
+  };
   source_result?: {                  // result identified by distillation step 1
     description: string;             // what was produced
     type: string;                    // "file" | "text" | "table" | "code" | "other"

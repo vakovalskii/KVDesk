@@ -170,7 +170,9 @@ export class MemorySessionStore {
 
   listSessions(): StoredSession[] {
     const now = Date.now();
-    return Array.from(this.sessions.values()).map(session => ({
+    return Array.from(this.sessions.values())
+      .filter((session) => !this.ephemeralIds.has(session.id))
+      .map(session => ({
       id: session.id,
       title: session.title,
       status: session.status,
@@ -397,6 +399,13 @@ export class MemorySessionStore {
     if (!session) return;
     session.inputTokens = (session.inputTokens || 0) + inputTokens;
     session.outputTokens = (session.outputTokens || 0) + outputTokens;
+
+    if (!this.ephemeralIds.has(id)) {
+      this.syncCallback?.("update", id, {
+        inputTokens: session.inputTokens,
+        outputTokens: session.outputTokens
+      });
+    }
   }
 
   listRecentCwds(_limit = 8): string[] {

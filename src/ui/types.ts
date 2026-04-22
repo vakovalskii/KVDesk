@@ -1,5 +1,5 @@
 import type { SDKMessage, PermissionResult } from "@anthropic-ai/claude-agent-sdk";
-import type { MiniWorkflow, MiniWorkflowSummary, MiniWorkflowTestResult } from "../shared/mini-workflow-types.js";
+import type { MiniWorkflow, MiniWorkflowSummary } from "../shared/mini-workflow-types.js";
 export type { MiniWorkflow, MiniWorkflowSummary, MiniWorkflowTestResult } from "../shared/mini-workflow-types.js";
 export { detectPermissions } from "../shared/mini-workflow-types.js";
 export type { DetectedPermissions } from "../shared/mini-workflow-types.js";
@@ -9,7 +9,36 @@ export type UserPromptMessage = {
   prompt: string;
 };
 
-export type StreamMessage = SDKMessage | UserPromptMessage;
+export type MiniAppStepProgressMessage = {
+  type: "miniapp_step_progress";
+  stepId?: string;
+  stepIndex?: number;
+  totalSteps?: number;
+  title: string;
+  text: string;
+};
+
+export type MiniAppStepResultMessage = {
+  type: "miniapp_step_result";
+  stepId: string;
+  stepIndex?: number;
+  totalSteps?: number;
+  title: string;
+  status: "success" | "failed";
+  summary: string;
+  fullText?: string;
+  artifactPaths?: string[];
+  usage?: {
+    input_tokens: number;
+    output_tokens: number;
+  };
+};
+
+export type StreamMessage =
+  | SDKMessage
+  | UserPromptMessage
+  | MiniAppStepProgressMessage
+  | MiniAppStepResultMessage;
 
 export type SessionStatus = "idle" | "running" | "completed" | "error";
 
@@ -277,7 +306,7 @@ export type ServerEvent =
   | { type: "miniworkflow.distill.progress"; payload: { sessionId: string; step: number; totalSteps: number; label: string; usage?: { input_tokens: number; output_tokens: number } } }
   | { type: "miniworkflow.distill.result"; payload: { sessionId: string; usage?: { input_tokens: number; output_tokens: number }; debugLogPath?: string; result: { status: "success"; workflow: MiniWorkflow } | { status: "needs_clarification"; questions: string[] } | { status: "not_suitable"; reason: string; suggest_prompt_preset: boolean } | { status: "cancelled" } } }
   | { type: "miniworkflow.replay.started"; payload: { workflowId: string; sessionId: string } }
-  | { type: "miniworkflow.replay.verified"; payload: { workflowId: string; sessionId: string; verification: { match: boolean; summary: string; discrepancies: string[]; suggestions: string[] }; verifyCycles?: { used: number; max: number }; replayArtifacts?: { filesCreated: string[]; stepResults: Record<string, string>; workspaceDir?: string } } }
+  | { type: "miniworkflow.replay.verified"; payload: { workflowId: string; sessionId: string; source?: "runtime" | "editor_verify" | "distill"; verification: { match: boolean; summary: string; discrepancies: string[]; suggestions: string[] }; verifyCycles?: { used: number; max: number }; replayArtifacts?: { filesCreated: string[]; stepResults: Record<string, string>; workspaceDir?: string } } }
   | { type: "miniworkflow.refine.result"; payload: { sessionId: string; result: { status: "success"; message: string; workflow: MiniWorkflow } | { status: "error"; message: string } } }
   | { type: "miniworkflow.error"; payload: { message: string } }
   // Compact events
@@ -344,6 +373,7 @@ export type ClientEvent =
   | { type: "miniworkflow.delete"; payload: { workflowId: string; scope?: "global" | "project" | "both"; cwd?: string } }
   | { type: "miniworkflow.replay"; payload: { workflowId: string; inputs: Record<string, unknown>; cwd?: string; model?: string } }
   | { type: "miniworkflow.refine"; payload: { sessionId: string; workflow: MiniWorkflow; userMessage: string } }
+  | { type: "miniworkflow.refine.cancel"; payload: { sessionId: string } }
   | { type: "miniworkflow.verify"; payload: { sessionId: string; workflow: MiniWorkflow } }
   | { type: "miniworkflow.fix-discrepancies"; payload: { sessionId: string; workflow: MiniWorkflow; discrepancies: string[]; suggestions: string[] } }
   // Compact events

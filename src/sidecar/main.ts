@@ -88,7 +88,88 @@ sessions.setSyncCallback((type, sessionId, data) => {
 (global as any).sessionStore = sessions;
 
 const runnerHandles = new Map<string, RunnerHandle>();
+const stoppedSessionIds = new Set<string>();
+const refineAbortControllers = new Map<string, AbortController>();
 const multiThreadTasks = new Map<string, any>();
+const STEP_OUTPUT_DIR = "__miniapp_steps";
+
+function sanitizeStepFileName(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, "-").replace(/^-+|-+$/g, "") || "step";
+}
+
+function detectStepOutputExtension(content: string): ".json" | ".md" | ".txt" {
+  const trimmed = content.trim();
+  if (!trimmed) return ".txt";
+  if ((trimmed.startsWith("{") && trimmed.endsWith("}")) || (trimmed.startsWith("[") && trimmed.endsWith("]"))) {
+    try {
+      JSON.parse(trimmed);
+      return ".json";
+    } catch {
+      // ignore
+    }
+  }
+  if (trimmed.includes("```") || /^#{1,6}\s/m.test(trimmed)) return ".md";
+  return ".txt";
+}
+
+function buildStepPreview(content: string, limit = 1200): string {
+  const normalized = content.replace(/\r\n/g, "\n").trim();
+  if (!normalized) return "Step completed without inline text output. Check saved artifacts in workspace.";
+  if (normalized.length <= limit) return normalized;
+  return `${normalized.slice(0, limit)}\n...(preview truncated, full output saved to workspace)`;
+}
+
+function buildStepSummary(stepTitle: string, content: string, artifactPaths: string[]): string {
+  const preview = content.replace(/\s+/g, " ").trim();
+  const compactPreview = preview.length > 240 ? `${preview.slice(0, 240)}...` : preview;
+  const artifactText = artifactPaths.length > 0 ? ` Saved artifacts: ${artifactPaths.join(", ")}` : "";
+  return compactPreview
+    ? `${stepTitle} completed.${artifactText} Preview: ${compactPreview}`
+    : `${stepTitle} completed.${artifactText}`;
+}
+
+async function persistStepOutput(
+  workspaceDir: string,
+  step: { id: string; title?: string },
+  content: string
+): Promise<{ artifactPaths: string[]; compactResult: string; preview: string }> {
+  const outputDir = join(workspaceDir, STEP_OUTPUT_DIR);
+  await fs.mkdir(outputDir, { recursive: true });
+
+  const safeBase = sanitizeStepFileName(step.id);
+  const extension = detectStepOutputExtension(content);
+  const outputFileName = `${safeBase}${extension}`;
+  const manifestFileName = `${safeBase}.manifest.json`;
+  const outputPath = join(outputDir, outputFileName);
+  const manifestPath = join(outputDir, manifestFileName);
+  const preview = buildStepPreview(content);
+
+  let fileContent = content;
+  if (extension === ".json") {
+    try {
+      fileContent = `${JSON.stringify(JSON.parse(content), null, 2)}\n`;
+    } catch {
+      fileContent = content;
+    }
+  }
+  await fs.writeFile(outputPath, fileContent, "utf8");
+
+  const artifactPaths = [`${STEP_OUTPUT_DIR}/${outputFileName}`, `${STEP_OUTPUT_DIR}/${manifestFileName}`];
+  await fs.writeFile(manifestPath, JSON.stringify({
+    step_id: step.id,
+    title: step.title || step.id,
+    saved_at: new Date().toISOString(),
+    output_file: artifactPaths[0],
+    content_type: extension.slice(1),
+    preview
+  }, null, 2), "utf8");
+
+  return {
+    artifactPaths,
+    compactResult: buildStepSummary(step.title || step.id, content, artifactPaths),
+    preview
+  };
+}
 
 function selectRunner(model: string | undefined) {
   if (model?.startsWith("claude-code::")) {
@@ -510,6 +591,7 @@ function handleSessionHistory(event: Extract<ClientEvent, { type: "session.histo
 }
 
 function startRunner(sessionId: string, prompt: string) {
+  stoppedSessionIds.delete(sessionId);
   const session = sessions.getSession(sessionId);
   if (!session) {
     sendRunnerError("Unknown session", sessionId);
@@ -652,6 +734,8 @@ function handleSessionContinue(event: Extract<ClientEvent, { type: "session.cont
 
 function handleSessionStop(event: Extract<ClientEvent, { type: "session.stop" }>) {
   const { sessionId } = event.payload;
+  stoppedSessionIds.add(sessionId);
+  sessions.getSession(sessionId)?.abortController?.abort();
   const handle = runnerHandles.get(sessionId);
   if (handle) {
     handle.abort();
@@ -677,6 +761,8 @@ function handleSessionStop(event: Extract<ClientEvent, { type: "session.stop" }>
 
 function handleSessionDelete(event: Extract<ClientEvent, { type: "session.delete" }>) {
   const { sessionId } = event.payload;
+  stoppedSessionIds.add(sessionId);
+  sessions.getSession(sessionId)?.abortController?.abort();
   const handle = runnerHandles.get(sessionId);
   if (handle) {
     handle.abort();
@@ -1383,6 +1469,7 @@ interface FullReplayResult {
   scriptErrors: Record<string, string>;
   filesCreated: string[];
   sessionId: string;
+  inputs?: Record<string, unknown>;
 }
 
 async function runFullReplay(
@@ -1426,6 +1513,7 @@ async function runFullReplay(
   }
 
   const scriptResults: Record<string, string> = {};
+  const stepDisplayResults: Record<string, string> = {};
   const scriptErrors: Record<string, string> = {};
   const scriptSteps = (workflow.chain || []).filter((s: any) => s.execution === "script" && s.script?.code);
 
@@ -1456,10 +1544,14 @@ async function runFullReplay(
           timeout: 120_000,
           maxBuffer: 10 * 1024 * 1024
         });
-        scriptResults[step.id] = (stdout || "").trim();
+        const scriptOutput = (stdout || "").trim();
+        const persisted = await persistStepOutput(workspaceDir, step, scriptOutput);
+        scriptResults[step.id] = scriptOutput;
+        stepDisplayResults[step.id] = persisted.compactResult;
       } catch (err: any) {
         scriptErrors[step.id] = err.message || String(err);
         scriptResults[step.id] = `[SCRIPT ERROR: ${err.message}]`;
+        stepDisplayResults[step.id] = scriptResults[step.id];
       }
     }
   }
@@ -1533,9 +1625,12 @@ async function runFullReplay(
 
     try {
       const result = await runSingleStep(stepPrompt, step.title);
+      const persisted = await persistStepOutput(workspaceDir, step, result);
       allStepResults[step.id] = result;
+      stepDisplayResults[step.id] = persisted.compactResult;
     } catch (stepErr) {
       allStepResults[step.id] = `[LLM ERROR: ${String(stepErr)}]`;
+      stepDisplayResults[step.id] = allStepResults[step.id];
     }
   }
 
@@ -1553,7 +1648,7 @@ async function runFullReplay(
     emit({ type: "session.status", payload: { sessionId: session.id, status: "completed" } } as any);
   }
 
-  return { stepResults: allStepResults, scriptErrors, filesCreated, sessionId: session.id };
+  return { stepResults: stepDisplayResults, scriptErrors, filesCreated, sessionId: session.id, inputs };
 }
 
 async function runAgentVerification(
@@ -1689,7 +1784,7 @@ async function runAgentRefine(
   verification: { discrepancies: string[]; suggestions: string[] },
   schemaRef: string,
   workspaceDir: string,
-  options?: { model?: string; debugLog?: DistillDebugLog; debugStep?: string }
+  options?: { model?: string; debugLog?: DistillDebugLog; debugStep?: string; signal?: AbortSignal }
 ): Promise<{ message: string; workflow: any; usage: { input_tokens: number; output_tokens: number } }> {
   const prompt = buildRefinePrompt(workflow, verification, schemaRef);
 
@@ -1922,14 +2017,14 @@ async function handleClientEvent(event: ClientEvent) {
       if (saveCwd) {
         await miniWorkflowStore.save(wfToSave, { scope: "project", projectCwd: saveCwd });
       }
-      const updatedList = await miniWorkflowStore.list({ projectCwd: saveCwd, includeProject: Boolean(saveCwd) });
+      const updatedList = await miniWorkflowStore.list({ projectCwd: saveCwd, includeProject: Boolean(saveCwd), includeArchived: true });
       emit({ type: "miniworkflow.list", payload: { workflows: updatedList } } as any);
       return;
     }
     case "miniworkflow.delete": {
       const { workflowId: delId, scope, cwd: delCwd } = (event as any).payload;
       await miniWorkflowStore.delete(delId, { scope: scope ?? "both", projectCwd: delCwd });
-      const afterDelete = await miniWorkflowStore.list({ projectCwd: delCwd, includeProject: Boolean(delCwd) });
+      const afterDelete = await miniWorkflowStore.list({ projectCwd: delCwd, includeProject: Boolean(delCwd), includeArchived: true });
       emit({ type: "miniworkflow.list", payload: { workflows: afterDelete } } as any);
       return;
     }
@@ -1978,7 +2073,7 @@ async function handleClientEvent(event: ClientEvent) {
           { ...wfToArch, status: "archived", updated_at: new Date().toISOString() },
           { scope: sourceScope, projectCwd: archCwd }
         );
-        const afterArchive = await miniWorkflowStore.list({ projectCwd: archCwd, includeProject: Boolean(archCwd) });
+        const afterArchive = await miniWorkflowStore.list({ projectCwd: archCwd, includeProject: Boolean(archCwd), includeArchived: true });
         emit({ type: "miniworkflow.list", payload: { workflows: afterArchive } } as any);
       } catch (err) {
         emit({ type: "miniworkflow.error", payload: { message: `Failed to archive: ${String(err)}` } } as any);
@@ -2143,6 +2238,9 @@ async function handleClientEvent(event: ClientEvent) {
             llm_calls: redactDebugLog(debugLog)
           }, null, 2), "utf8");
         }
+        if (debugLogPath) {
+          (finalWorkflow as any).debug_log_path = debugLogPath;
+        }
 
         emit({
           type: "miniworkflow.distill.result",
@@ -2150,13 +2248,13 @@ async function handleClientEvent(event: ClientEvent) {
         } as any);
 
         if (verificationResult) {
-          emit({
-            type: "miniworkflow.replay.verified",
-            payload: {
-              workflowId: finalWorkflow.id, sessionId: distillSessionId, verification: verificationResult,
-              verifyCycles: { used: verifyCyclesUsed, max: MAX_VERIFY_CYCLES },
-              replayArtifacts: lastReplayResult ? {
-                filesCreated: lastReplayResult.filesCreated,
+        emit({
+          type: "miniworkflow.replay.verified",
+          payload: {
+            workflowId: finalWorkflow.id, sessionId: distillSessionId, source: "distill", verification: verificationResult,
+            verifyCycles: { used: verifyCyclesUsed, max: MAX_VERIFY_CYCLES },
+            replayArtifacts: lastReplayResult ? {
+              filesCreated: lastReplayResult.filesCreated,
                 stepResults: lastReplayResult.stepResults,
                 workspaceDir: testDir
               } : undefined
@@ -2197,7 +2295,7 @@ async function handleClientEvent(event: ClientEvent) {
         emit({
           type: "miniworkflow.replay.verified",
           payload: {
-            workflowId: verifyWorkflow.id, sessionId: verifySessionId, verification,
+            workflowId: verifyWorkflow.id, sessionId: verifySessionId, source: "editor_verify", verification,
             replayArtifacts: { filesCreated: replayResult.filesCreated, stepResults: replayResult.stepResults, workspaceDir: testDir }
           }
         } as any);
@@ -2205,7 +2303,7 @@ async function handleClientEvent(event: ClientEvent) {
         emit({
           type: "miniworkflow.replay.verified",
           payload: {
-            workflowId: verifyWorkflow.id, sessionId: verifySessionId,
+            workflowId: verifyWorkflow.id, sessionId: verifySessionId, source: "editor_verify",
             verification: { match: false, summary: `Ошибка верификации: ${String(err)}`, discrepancies: [String(err)], suggestions: [] }
           }
         } as any);
@@ -2215,17 +2313,24 @@ async function handleClientEvent(event: ClientEvent) {
     case "miniworkflow.fix-discrepancies": {
       const { sessionId: fixSessionId, workflow: fixWorkflow, discrepancies, suggestions } = (event as any).payload;
       try {
+        refineAbortControllers.get(fixSessionId)?.abort();
+        const refineAbortController = new AbortController();
+        refineAbortControllers.set(fixSessionId, refineAbortController);
         const schemaRef = getMiniWorkflowSchemaPrompt();
         const testDir = join(getDataDir(), "distill-verify", fixSessionId);
         await fs.mkdir(testDir, { recursive: true });
 
-        const refineData = await runAgentRefine(fixWorkflow, { discrepancies, suggestions }, schemaRef, testDir, { model: fixWorkflow.source_model });
+        const refineData = await runAgentRefine(fixWorkflow, { discrepancies, suggestions }, schemaRef, testDir, { model: fixWorkflow.source_model, signal: refineAbortController.signal });
         if (refineData.workflow) {
           const validation = validateWorkflow(refineData.workflow as Record<string, unknown>);
           if (validation.valid) {
             refineData.workflow.source_model = fixWorkflow.source_model;
             refineData.workflow.source_context = fixWorkflow.source_context;
             refineData.workflow.source_result = fixWorkflow.source_result;
+            refineData.workflow.source_session_id = fixWorkflow.source_session_id;
+            refineData.workflow.source_session_cwd = fixWorkflow.source_session_cwd;
+            refineData.workflow.status = fixWorkflow.status;
+            (refineData.workflow as any).debug_log_path = (fixWorkflow as any).debug_log_path;
             emit({
               type: "miniworkflow.refine.result",
               payload: { sessionId: fixSessionId, result: { status: "success", message: refineData.message || "Workflow исправлен.", workflow: refineData.workflow } }
@@ -2247,12 +2352,17 @@ async function handleClientEvent(event: ClientEvent) {
           type: "miniworkflow.refine.result",
           payload: { sessionId: fixSessionId, result: { status: "error", message: `Ошибка: ${String(err)}` } }
         } as any);
+      } finally {
+        refineAbortControllers.delete(fixSessionId);
       }
       return;
     }
     case "miniworkflow.refine": {
       const { sessionId: refineSessionId, workflow: refineWorkflow, userMessage } = (event as any).payload;
       try {
+        refineAbortControllers.get(refineSessionId)?.abort();
+        const refineAbortController = new AbortController();
+        refineAbortControllers.set(refineSessionId, refineAbortController);
         const { client, modelName } = getLlmConnection(refineWorkflow.source_model);
         const schemaRef = getMiniWorkflowSchemaPrompt();
         const sourceCtx = refineWorkflow.source_context
@@ -2261,7 +2371,7 @@ async function handleClientEvent(event: ClientEvent) {
 
         const systemPrompt = `Ты редактор MiniWorkflow. Пользователь просит внести изменения в workflow.\n\n${schemaRef}\n\nТекущий workflow (JSON):\n\`\`\`json\n${JSON.stringify(refineWorkflow, null, 2)}\n\`\`\`\n${sourceCtx}\n\nОтветь JSON (без markdown-обёртки):\n{\n  "message": "краткое описание что изменено",\n  "workflow": { ...обновлённый workflow целиком }\n}\n\nЕсли запрос непонятен или невыполним, верни:\n{ "message": "пояснение почему нельзя", "workflow": null }`;
 
-        const result = await llmCall(client, modelName, systemPrompt, userMessage);
+        const result = await llmCall(client, modelName, systemPrompt, userMessage, undefined, undefined, refineAbortController.signal);
         const data = result.data;
 
         if (data.workflow) {
@@ -2272,6 +2382,13 @@ async function handleClientEvent(event: ClientEvent) {
               payload: { sessionId: refineSessionId, result: { status: "error", message: `Агент вернул невалидный workflow: ${validation.errors.join("; ")}` } }
             } as any);
           } else {
+            data.workflow.source_session_id = refineWorkflow.source_session_id;
+            data.workflow.source_session_cwd = refineWorkflow.source_session_cwd;
+            data.workflow.source_model = refineWorkflow.source_model;
+            data.workflow.source_context = refineWorkflow.source_context;
+            data.workflow.source_result = refineWorkflow.source_result;
+            data.workflow.status = refineWorkflow.status;
+            (data.workflow as any).debug_log_path = (refineWorkflow as any).debug_log_path;
             emit({
               type: "miniworkflow.refine.result",
               payload: { sessionId: refineSessionId, result: { status: "success", message: data.message || "Workflow обновлён.", workflow: data.workflow } }
@@ -2284,15 +2401,34 @@ async function handleClientEvent(event: ClientEvent) {
           } as any);
         }
       } catch (err) {
+        if ((err as any)?.name === "AbortError") {
+          emit({
+            type: "miniworkflow.refine.result",
+            payload: { sessionId: refineSessionId, result: { status: "error", message: "Request cancelled." } }
+          } as any);
+          return;
+        }
         emit({
           type: "miniworkflow.refine.result",
           payload: { sessionId: refineSessionId, result: { status: "error", message: `Ошибка: ${String(err)}` } }
         } as any);
+      } finally {
+        refineAbortControllers.delete(refineSessionId);
       }
+      return;
+    }
+    case "miniworkflow.refine.cancel": {
+      const { sessionId: refineSessionId } = (event as any).payload;
+      refineAbortControllers.get(refineSessionId)?.abort();
+      refineAbortControllers.delete(refineSessionId);
       return;
     }
     case "miniworkflow.replay": {
       const { workflowId: replayWfId, cwd: replayCwd, inputs: replayInputs, model: replayModel } = (event as any).payload;
+      if (!replayModel || !String(replayModel).trim()) {
+        emit({ type: "miniworkflow.error", payload: { message: "Model is required to run Vale App" } } as any);
+        return;
+      }
       const replayWorkflow = await miniWorkflowStore.load(replayWfId, { projectCwd: replayCwd, preferProject: true });
       if (!replayWorkflow) {
         emit({ type: "miniworkflow.error", payload: { message: `Workflow not found: ${replayWfId}` } } as any);
@@ -2311,11 +2447,14 @@ async function handleClientEvent(event: ClientEvent) {
         title: `${replayWorkflow.name}${firstInputValue ? `: ${String(firstInputValue)}` : ""}`,
         allowedTools: replayWorkflow.compatibility.tools_required.join(","),
         prompt: "",
-        model: replayModel || undefined
+        model: replayModel
       });
+      const replayAbortController = new AbortController();
+      sessions.setAbortController(session.id, replayAbortController);
+      stoppedSessionIds.delete(session.id);
       sessions.updateSession(session.id, { status: "running" });
 
-      emit({ type: "session.status", payload: { sessionId: session.id, status: "running", title: session.title, cwd: session.cwd } } as any);
+      emit({ type: "session.status", payload: { sessionId: session.id, status: "running", title: session.title, cwd: session.cwd, model: session.model } } as any);
       emit({ type: "miniworkflow.replay.started", payload: { workflowId: replayWorkflow.id, sessionId: session.id } } as any);
 
       const secretBag: Record<string, string> = {};
@@ -2328,18 +2467,26 @@ async function handleClientEvent(event: ClientEvent) {
 
       // Execute scripted steps
       const scriptResults: Record<string, string> = {};
+      const stepDisplayResults: Record<string, string> = {};
       const scriptSteps = ((replayWorkflow as any).chain || []).filter((s: any) => s.execution === "script" && s.script?.code);
       if (scriptSteps.length > 0) {
         const { execFile } = await import("child_process");
         const { promisify } = await import("util");
         const execFileAsync = promisify(execFile);
 
-        const emitProgress = (text: string) => emit({
-          type: "stream.message", payload: { sessionId: session.id, message: { type: "system", subtype: "notice", text } as any }
+        const emitProgress = (text: string) => emitAndPersist({
+          type: "stream.message",
+          payload: {
+            sessionId: session.id,
+            message: { type: "miniapp_step_progress", title: "MiniApp progress", text } as any
+          }
         } as any);
         emitProgress(`⏳ Выполняю предварительные скрипты (${scriptSteps.length})...`);
 
         for (const step of scriptSteps) {
+          if (stoppedSessionIds.has(session.id) || replayAbortController.signal.aborted) {
+            throw new Error("__SESSION_STOPPED__");
+          }
           try {
             const SAFE_ENV_KEYS = new Set(["PATH", "HOME", "USERPROFILE", "TEMP", "TMP", "TMPDIR", "LANG", "SYSTEMROOT", "COMSPEC", "SHELL", "PYTHONPATH", "PYTHONHOME", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "WINDIR"]);
             const SECRET_PATTERNS = /(_KEY|_SECRET|_TOKEN|_PASSWORD|_CREDENTIAL|_AUTH)$|^(OPENAI|ANTHROPIC|TAVILY|ZAI|AWS_|AZURE_|GOOGLE_|GITHUB_TOKEN|NPM_TOKEN|CODEX_)/i;
@@ -2357,11 +2504,47 @@ async function handleClientEvent(event: ClientEvent) {
             emitProgress(`▸ ${step.title}...`);
 
             const { stdout } = await execFileAsync("python", [scriptFile], {
-              cwd: workflowDir, env, timeout: 120_000, maxBuffer: 10 * 1024 * 1024
+              cwd: workflowDir, env, timeout: 120_000, maxBuffer: 10 * 1024 * 1024, signal: replayAbortController.signal
             });
-            scriptResults[step.id] = (stdout || "").trim();
+            const scriptOutput = (stdout || "").trim();
+            const persisted = await persistStepOutput(workflowDir, step, scriptOutput);
+            scriptResults[step.id] = scriptOutput;
+            stepDisplayResults[step.id] = persisted.compactResult;
+            emitAndPersist({
+              type: "stream.message",
+              payload: {
+                sessionId: session.id,
+                message: {
+                  type: "miniapp_step_result",
+                  stepId: step.id,
+                  title: step.title,
+                  status: "success",
+                  summary: persisted.compactResult,
+                  fullText: persisted.preview,
+                  artifactPaths: persisted.artifactPaths
+                } as any
+              }
+            } as any);
           } catch (err: any) {
+            if (stoppedSessionIds.has(session.id) || replayAbortController.signal.aborted || err?.name === "AbortError") {
+              throw new Error("__SESSION_STOPPED__");
+            }
             scriptResults[step.id] = `[SCRIPT ERROR: ${err.message}]`;
+            stepDisplayResults[step.id] = scriptResults[step.id];
+            emitAndPersist({
+              type: "stream.message",
+              payload: {
+                sessionId: session.id,
+                message: {
+                  type: "miniapp_step_result",
+                  stepId: step.id,
+                  title: step.title,
+                  status: "failed",
+                  summary: `Script step failed: ${String(err.message || err)}`,
+                  fullText: String(err.stack || err.message || err)
+                } as any
+              }
+            } as any);
           }
         }
         emitProgress(`✅ Скрипты выполнены. Запускаю агента...`);
@@ -2379,28 +2562,71 @@ async function handleClientEvent(event: ClientEvent) {
         void writeReplayLog(replayWorkflow as any, { inputs, final_status: status, step_results: orderedSteps });
       };
 
-      const emitStepProgress = (text: string) => emit({
-        type: "stream.message", payload: { sessionId: session.id, message: { type: "system", subtype: "notice", text } as any }
+      const emitStepProgress = (text: string) => emitAndPersist({
+        type: "stream.message",
+        payload: {
+          sessionId: session.id,
+          message: { type: "miniapp_step_progress", title: "MiniApp progress", text } as any
+        }
       } as any);
 
-      const runSingleStep = (stepPrompt: string, stepTitle: string): Promise<string> => {
+      const runSingleStep = (
+        stepPrompt: string,
+        stepTitle: string
+      ): Promise<{ text: string; usage: { input_tokens: number; output_tokens: number } }> => {
         return new Promise((resolve, reject) => {
           let collectedText = "";
           let stepCompleted = false;
+          let stepUsage = { input_tokens: 0, output_tokens: 0 };
 
           const stepEmit = (serverEvent: ServerEvent) => {
-            emit(serverEvent);
+            const msgType = serverEvent.type === "stream.message" ? (serverEvent.payload.message as any)?.type : null;
+            const msgSubtype = serverEvent.type === "stream.message" ? (serverEvent.payload.message as any)?.subtype : null;
+            const shouldForward =
+              serverEvent.type !== "stream.message"
+              || ((msgType !== "assistant" && msgType !== "text" && msgType !== "result" && msgType !== "user")
+                && !(msgType === "system" && msgSubtype === "init"));
+            if (shouldForward) {
+              emit(serverEvent);
+            }
             if (serverEvent.type === "stream.message" && serverEvent.payload.sessionId === session.id) {
               const msg = serverEvent.payload.message as any;
-              if (msg.type === "assistant" && msg.content) {
-                collectedText += msg.content;
+              if (msg.type === "result" && msg.result) {
+                collectedText = msg.result;
+                if (msg.usage) {
+                  stepUsage = {
+                    input_tokens: msg.usage.input_tokens ?? 0,
+                    output_tokens: msg.usage.output_tokens ?? 0
+                  };
+                }
+              } else if (msg.type === "assistant" && msg.message?.content) {
+                const parts = Array.isArray(msg.message.content) ? msg.message.content : [msg.message.content];
+                for (const part of parts) {
+                  if (part.type === "text" && part.text) {
+                    collectedText += part.text;
+                  }
+                }
               } else if (msg.type === "text" && msg.text) {
                 collectedText += msg.text;
+              } else if (msg.type === "user" && msg.message?.content) {
+                const parts = Array.isArray(msg.message.content) ? msg.message.content : [msg.message.content];
+                for (const part of parts) {
+                  if (part.type === "tool_result" && part.content) {
+                    collectedText += `\n[tool_result] ${part.content}`;
+                  }
+                }
               }
             }
             if (serverEvent.type === "session.status" && serverEvent.payload.sessionId === session.id) {
               if (serverEvent.payload.status === "completed" || serverEvent.payload.status === "idle") {
-                if (!stepCompleted) { stepCompleted = true; resolve(collectedText.trim()); }
+                if (!stepCompleted) {
+                  stepCompleted = true;
+                  if (stoppedSessionIds.has(session.id)) {
+                    reject(new Error("__SESSION_STOPPED__"));
+                  } else {
+                    resolve({ text: collectedText.trim(), usage: stepUsage });
+                  }
+                }
               }
               if (serverEvent.payload.status === "error") {
                 if (!stepCompleted) { stepCompleted = true; reject(new Error(`Step "${stepTitle}" failed`)); }
@@ -2425,30 +2651,86 @@ async function handleClientEvent(event: ClientEvent) {
       (async () => {
         try {
           for (let i = 0; i < llmSteps.length; i++) {
+            if (stoppedSessionIds.has(session.id)) {
+              throw new Error("__SESSION_STOPPED__");
+            }
             const step = llmSteps[i];
             const stepStartedAt = Date.now();
-            emitStepProgress(`▸ Шаг ${i + 1}/${llmSteps.length}: ${step.title}...`);
+            emitAndPersist({
+              type: "stream.message",
+              payload: {
+                sessionId: session.id,
+                message: {
+                  type: "miniapp_step_progress",
+                  stepId: step.id,
+                  stepIndex: i + 1,
+                  totalSteps: llmSteps.length,
+                  title: step.title,
+                  text: `Executing step ${i + 1}/${llmSteps.length}: ${step.title}`
+                } as any
+              }
+            } as any);
 
             const stepPrompt = buildStepPrompt(replayWorkflow as any, step, i, llmSteps.length, inputs, allStepResults);
             sessions.updateSession(session.id, { lastPrompt: stepPrompt, status: "running" });
-            emit({ type: "stream.user_prompt", payload: { sessionId: session.id, prompt: stepPrompt } } as any);
 
             try {
               const result = await runSingleStep(stepPrompt, step.title);
-              allStepResults[step.id] = result;
+              const persisted = await persistStepOutput(workflowDir, step, result.text);
+              allStepResults[step.id] = result.text;
+              stepDisplayResults[step.id] = persisted.compactResult;
               orderedSteps.push({
-                step_id: step.id, status: "success", outputs: result.slice(0, 500),
+                step_id: step.id, status: "success", outputs: persisted.compactResult.slice(0, 500),
                 started_at: new Date(stepStartedAt).toISOString(),
                 finished_at: new Date().toISOString(),
                 duration_ms: Date.now() - stepStartedAt
               });
+              emitAndPersist({
+                type: "stream.message",
+                payload: {
+                  sessionId: session.id,
+                  message: {
+                    type: "miniapp_step_result",
+                    stepId: step.id,
+                    stepIndex: i + 1,
+                    totalSteps: llmSteps.length,
+                    title: step.title,
+                    status: "success",
+                    summary: persisted.compactResult,
+                    fullText: persisted.preview,
+                    artifactPaths: persisted.artifactPaths,
+                    usage: result.usage
+                  } as any
+                }
+              } as any);
             } catch (stepErr) {
+              if (String(stepErr) === "__SESSION_STOPPED__") {
+                throw stepErr;
+              }
+              allStepResults[step.id] = `[LLM ERROR: ${String(stepErr)}]`;
+              stepDisplayResults[step.id] = allStepResults[step.id];
               orderedSteps.push({
                 step_id: step.id, status: "failed", error: String(stepErr),
                 started_at: new Date(stepStartedAt).toISOString(),
                 finished_at: new Date().toISOString(),
                 duration_ms: Date.now() - stepStartedAt
               });
+              emitAndPersist({
+                type: "stream.message",
+                payload: {
+                  sessionId: session.id,
+                  message: {
+                    type: "miniapp_step_result",
+                    stepId: step.id,
+                    stepIndex: i + 1,
+                    totalSteps: llmSteps.length,
+                    title: step.title,
+                    status: "failed",
+                    summary: `Step failed: ${String(stepErr)}`,
+                    fullText: String(stepErr)
+                  } as any
+                }
+              } as any);
               finalizeReplayLog("partial");
               return;
             }
@@ -2458,6 +2740,9 @@ async function handleClientEvent(event: ClientEvent) {
           emitStepProgress(`✅ Все ${totalSteps} шагов выполнены.`);
 
           if (replayWorkflow.source_result?.description) {
+            if (stoppedSessionIds.has(session.id)) {
+              throw new Error("__SESSION_STOPPED__");
+            }
             emitStepProgress(`🔍 Верификация результата...`);
             try {
               const verifyModel = replayWorkflow.source_model || replayModel;
@@ -2468,31 +2753,63 @@ async function handleClientEvent(event: ClientEvent) {
               } catch { /* ignore */ }
 
               const replayResultForVerify: FullReplayResult = {
-                stepResults: allStepResults, scriptErrors: {}, filesCreated: replayFiles, sessionId: session.id
+                stepResults: stepDisplayResults, scriptErrors: {}, filesCreated: replayFiles, sessionId: session.id, inputs
               };
               const verification = await runAgentVerification(replayWorkflow as any, replayResultForVerify, workflowDir, { model: verifyModel });
 
-              emit({
+              emitAndPersist({
                 type: "miniworkflow.replay.verified",
                 payload: {
-                  workflowId: replayWorkflow.id, sessionId: session.id, verification,
-                  replayArtifacts: { filesCreated: replayFiles, stepResults: allStepResults, workspaceDir: workflowDir }
+                  workflowId: replayWorkflow.id, sessionId: session.id, source: "runtime", verification,
+                  replayArtifacts: { filesCreated: replayFiles, stepResults: stepDisplayResults, workspaceDir: workflowDir }
                 }
               } as any);
 
-              emitStepProgress(verification.match
-                ? `✅ Верификация пройдена: результат соответствует ожиданиям.`
-                : `⚠️ Верификация: обнаружены расхождения. Подробности на форме дистилляции.`);
+              const verificationLines = verification.match
+                ? [
+                    "✅ Верификация пройдена: результат соответствует ожиданиям.",
+                    verification.summary
+                  ]
+                : [
+                    "⚠️ Верификация обнаружила расхождения.",
+                    verification.summary,
+                    ...(verification.discrepancies.length > 0
+                      ? ["Расхождения:", ...verification.discrepancies.slice(0, 5).map((item) => `- ${item}`)]
+                      : []),
+                    ...(verification.suggestions.length > 0
+                      ? ["Рекомендации:", ...verification.suggestions.slice(0, 3).map((item) => `- ${item}`)]
+                      : [])
+                  ];
+
+              emitAndPersist({
+                type: "stream.message",
+                payload: {
+                  sessionId: session.id,
+                  message: {
+                    type: "system",
+                    subtype: "notice",
+                    text: verificationLines.join("\n")
+                  } as any
+                }
+              } as any);
             } catch (verifyErr) {
               emitStepProgress(`⚠️ Верификация не выполнена: ${String(verifyErr)}`);
             }
           }
 
           finalizeReplayLog("success");
+          sessions.setAbortController(session.id, undefined);
           sessions.updateSession(session.id, { status: "completed" });
           emit({ type: "session.status", payload: { sessionId: session.id, status: "completed" } } as any);
         } catch (err) {
+          if (String(err) === "__SESSION_STOPPED__") {
+            finalizeReplayLog("aborted");
+            sessions.setAbortController(session.id, undefined);
+            runnerHandles.delete(session.id);
+            return;
+          }
           finalizeReplayLog("failed");
+          sessions.setAbortController(session.id, undefined);
           sessions.updateSession(session.id, { status: "error" });
           emit({ type: "runner.error", payload: { sessionId: session.id, message: String(err) } } as any);
         }
@@ -2574,4 +2891,3 @@ rl.on("line", (line) => {
     process.exit(1);
   });
 });
-

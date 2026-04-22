@@ -47,6 +47,7 @@ Each step is one focused task executed in order.
 - `prompt_template` — prompt text sent to LLM. May contain:
   - `{{inputs.X}}` — user input value
   - `{{steps.<step_id>.result}}` — result from a previous step (use the step's `id`, not `output_key`)
+- For large outputs, design prompts so the agent writes the full artifact into the workspace and returns only a concise manifest/summary with exact file paths
 - `tools` — list of tool names available for this step (e.g. `["search_web", "write_file"]`)
 - `output_key` — name used by subsequent steps to reference this step's result
 - `execution`: `"llm"` (agent runs prompt) or `"script"` (deterministic code)
@@ -60,6 +61,7 @@ Each step is one focused task executed in order.
 1. Step 1 receives full context (goal, inputs, constraints) + its task
 2. Steps 2+ receive only their task + results from previous steps
 3. Last step may include validation instructions
+4. Prefer workspace files over giant inline outputs: later steps can read those files when they need the full data
 
 ## ValidationConfig
 

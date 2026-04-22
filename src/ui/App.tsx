@@ -21,6 +21,20 @@ import MDContent from "./render/markdown";
 import { getPlatform } from "./platform";
 import { basenameFsPath } from "./platform/fs-path";
 
+const SECONDARY_BUTTON_CLASS = "rounded-lg border border-ink-900/10 bg-white text-ink-700 transition-colors hover:border-ink-900/20 hover:bg-ink-100 active:bg-ink-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-ink-900/10 disabled:hover:bg-white";
+const SECONDARY_BUTTON_SM_CLASS = `${SECONDARY_BUTTON_CLASS} px-3 py-1.5 text-xs`;
+const SECONDARY_BUTTON_XS_CLASS = `${SECONDARY_BUTTON_CLASS} px-2 py-1 text-xs`;
+const WORKFLOW_MENU_ITEM_CLASS = "block w-full rounded-md px-2 py-1.5 text-left text-xs text-ink-700 transition-colors hover:bg-accent/10 hover:text-accent active:bg-accent/20";
+
+function isWorkflowInputFilled(input: MiniWorkflow["inputs"][number], value: string): boolean {
+  if (!input.required) return true;
+  if (input.type === "period") {
+    const [start = "", end = ""] = String(value ?? "").split("/");
+    return Boolean(start.trim() && end.trim());
+  }
+  return Boolean(String(value ?? "").trim());
+}
+
 function AppHeader({
   activeSessionId,
   setShowSessionEditModal,
@@ -179,6 +193,15 @@ function AppEmptyState() {
   );
 }
 
+function AppRunningState() {
+  return (
+    <div className="flex flex-col items-center justify-center py-20 text-center">
+      <div className="text-lg font-medium text-ink-700">MiniApp running</div>
+      <p className="mt-2 text-sm text-muted">Please wait, the result will appear here soon.</p>
+    </div>
+  );
+}
+
 type AppModalsProps = {
   showStartModal: boolean;
   setShowStartModal: (v: boolean) => void;
@@ -299,11 +322,13 @@ function App() {
   const messagesEndRef = useRef<HTMLDivElement>(null);
   const messagesContainerRef = useRef<HTMLDivElement>(null);
   const partialMessageRef = useRef("");
+  const partialMessageSessionIdRef = useRef<string | null>(null);
   const [partialMessage, setPartialMessage] = useState("");
   const [showPartialMessage, setShowPartialMessage] = useState(false);
   const isUserScrolledUpRef = useRef(false);
   const [showSettingsModal, setShowSettingsModal] = useState(false);
   const [showFileBrowser, setShowFileBrowser] = useState(false);
+  const [pendingPreviewPath, setPendingPreviewPath] = useState<string | null>(null);
   const [showWorkflowPanel, setShowWorkflowPanelRaw] = useState(false);
   const setShowWorkflowPanel = useCallback((v: boolean | ((prev: boolean) => boolean)) => {
     setShowWorkflowPanelRaw((prev) => {
@@ -320,6 +345,7 @@ function App() {
   const pendingWorkflowActionRef = useRef<"run" | "edit">("run");
   useEffect(() => { pendingWorkflowActionRef.current = pendingWorkflowAction; }, [pendingWorkflowAction]);
   const [pendingRunWorkflowId, setPendingRunWorkflowId] = useState<string | null>(null);
+  const [forcedRunningSessionId, setForcedRunningSessionId] = useState<string | null>(null);
   const pendingRunTimeoutRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const clearPendingRunTimeout = useCallback(() => {
     if (pendingRunTimeoutRef.current) {
@@ -329,6 +355,8 @@ function App() {
   }, []);
   const [showArchivedWorkflows, setShowArchivedWorkflows] = useState(false);
   const [openWorkflowMenuId, setOpenWorkflowMenuId] = useState<string | null>(null);
+  const workflowMenuRef = useRef<HTMLDivElement | null>(null);
+  const workflowPanelRef = useRef<HTMLElement | null>(null);
   const [distillSessionId, setDistillSessionId] = useState<string | null>(null);
   const [distillLoading, setDistillLoading] = useState(false);
   const [distillWorkflow, setDistillWorkflow] = useState<MiniWorkflow | null>(null);
@@ -369,6 +397,7 @@ function App() {
   const availableModels = useAppStore((s) => s.availableModels);
   const llmModels = useAppStore((s) => s.llmModels);
   const llmProviders = useAppStore((s) => s.llmProviders);
+  const enabledLlmModels = llmModels.filter((m) => m.enabled !== false);
 
   const sessions = useAppStore((s) => s.sessions);
   const sessionsLoaded = useAppStore((s) => s.sessionsLoaded);
@@ -408,6 +437,7 @@ function App() {
 
     const message = partialEvent.payload.message as any;
     if (message.event.type === "content_block_start") {
+      partialMessageSessionIdRef.current = partialEvent.payload.sessionId;
       partialMessageRef.current = "";
       setPartialMessage(partialMessageRef.current);
       setShowPartialMessage(true);
@@ -435,6 +465,7 @@ function App() {
       
       setShowPartialMessage(false);
       setTimeout(() => {
+        partialMessageSessionIdRef.current = null;
         partialMessageRef.current = "";
         setPartialMessage(partialMessageRef.current);
       }, 500);
@@ -505,6 +536,10 @@ function App() {
               max_fix_attempts: Number(wf.validation.max_fix_attempts) || 3,
             } : { acceptance_criteria: "", prompt_template: "", tools: [], max_fix_attempts: 3 },
             artifacts: Array.isArray(wf.artifacts) ? wf.artifacts : [],
+            debug_log_path: typeof wf.debug_log_path === "string" ? wf.debug_log_path : undefined,
+            last_review_verification: wf.last_review_verification || undefined,
+            last_review_artifacts: wf.last_review_artifacts || undefined,
+            last_review_cycles: wf.last_review_cycles || undefined,
           };
           setDistillWorkflow(sanitized);
           setDistillError(null);
@@ -533,36 +568,44 @@ function App() {
     if (event.type === "miniworkflow.loaded") {
       const full = event.payload.workflow;
       const action = pendingWorkflowActionRef.current;
-      if (action === "edit") {
-        setDistillSessionId(full.source_session_id || "manual");
-        setDistillWorkflow(full);
-        setDistillLoading(false);
-        setDistillError(null);
-        setDistillQuestions([]);
-        const cached = verificationCacheRef.current.get(full.id);
-        setReplayVerification(cached?.verification ?? null);
-        setReplayArtifacts(cached?.artifacts ?? null);
-        setVerifyCycles(cached?.cycles ?? null);
-      } else {
-        const defaults: Record<string, string> = {};
-        for (const input of full.inputs) defaults[input.id] = String(input.default ?? "");
-        setRunInputs(defaults);
-        setRunWorkflow(full);
-        clearPendingRunTimeout();
-        setPendingRunWorkflowId(null);
-      }
+        if (action === "edit") {
+          setDistillSessionId(full.source_session_id || "manual");
+          setDistillWorkflow(full);
+          setDistillLoading(false);
+          setDistillError(null);
+          setDistillQuestions([]);
+          setDistillDebugLogPath(typeof full.debug_log_path === "string" ? full.debug_log_path : null);
+          const cached = verificationCacheRef.current.get(full.id);
+          setReplayVerification(cached?.verification ?? full.last_review_verification ?? null);
+          setReplayArtifacts(cached?.artifacts ?? full.last_review_artifacts ?? null);
+          setVerifyCycles(cached?.cycles ?? full.last_review_cycles ?? null);
+        } else {
+          const defaults: Record<string, string> = {};
+          for (const input of full.inputs) defaults[input.id] = String(input.default ?? "");
+          setRunInputs(defaults);
+          const initialRunModel = full.source_model && enabledLlmModels.some((m) => m.id === full.source_model)
+            ? full.source_model
+            : enabledLlmModels[0]?.id || "";
+          setRunModel(initialRunModel);
+          setRunWorkflow(full);
+          clearPendingRunTimeout();
+          setPendingRunWorkflowId(null);
+        }
     }
     if (event.type === "miniworkflow.replay.verified") {
-      setReplayVerification(event.payload.verification);
-      setReplayArtifacts(event.payload.replayArtifacts || null);
-      setVerifyCycles(event.payload.verifyCycles || null);
-      const wfId = event.payload.workflowId;
-      if (wfId) {
-        verificationCacheRef.current.set(wfId, {
-          verification: event.payload.verification,
-          artifacts: event.payload.replayArtifacts || null,
-          cycles: event.payload.verifyCycles || null,
-        });
+      const source = event.payload.source || "runtime";
+      if (source !== "runtime") {
+        setReplayVerification(event.payload.verification);
+        setReplayArtifacts(event.payload.replayArtifacts || null);
+        setVerifyCycles(event.payload.verifyCycles || null);
+        const wfId = event.payload.workflowId;
+        if (wfId) {
+          verificationCacheRef.current.set(wfId, {
+            verification: event.payload.verification,
+            artifacts: event.payload.replayArtifacts || null,
+            cycles: event.payload.verifyCycles || null,
+          });
+        }
       }
     }
     if (event.type === "miniworkflow.refine.result") {
@@ -573,18 +616,23 @@ function App() {
       setGlobalError(event.payload.message);
       clearPendingRunTimeout();
       setPendingRunWorkflowId(null);
+      setForcedRunningSessionId(null);
       window.dispatchEvent(new CustomEvent("distill-error", { detail: event }));
     }
     if (event.type === "miniworkflow.replay.started") {
       const { sessionId } = event.payload;
+      setForcedRunningSessionId(sessionId);
       useAppStore.getState().setActiveSessionId(sessionId);
+    }
+    if (event.type === "session.status" && event.payload.sessionId === forcedRunningSessionId && event.payload.status !== "running") {
+      setForcedRunningSessionId(null);
     }
 
     // Scheduler notifications are now handled natively by Rust
     if (event.type === "scheduler.notification") {
       console.log(`[scheduler] 🔔 ${event.payload.title}: ${event.payload.body}`);
     }
-  }, [handleServerEvent, handlePartialMessages, pendingWorkflowAction, setGlobalError, clearPendingRunTimeout]);
+  }, [handleServerEvent, handlePartialMessages, pendingWorkflowAction, setGlobalError, clearPendingRunTimeout, enabledLlmModels, forcedRunningSessionId]);
 
   const { connected, sendEvent } = useIPC(onEvent);
 
@@ -593,11 +641,75 @@ function App() {
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
   const isRunning = activeSession?.status === "running";
+  const isMiniAppSession = Boolean(activeSession?.cwd && activeSession.cwd.includes(".valera\\workflows\\"));
+  const showSessionPartialMessage = showPartialMessage && partialMessageSessionIdRef.current === activeSessionId && !isMiniAppSession;
+  const showRunningEmptyState = messages.length === 0
+    && !showSessionPartialMessage
+    && Boolean(activeSessionId && ((forcedRunningSessionId && forcedRunningSessionId === activeSessionId) || activeSession?.status === "running"));
+
+  useEffect(() => {
+    const handlePreviewFile = (event: Event) => {
+      const customEvent = event as CustomEvent<{ path?: string; cwd?: string }>;
+      const path = customEvent.detail?.path;
+      if (!path) return;
+      if (!(apiSettings?.useBuiltinViewer ?? true) || !activeSession?.cwd) {
+        getPlatform().sendClientEvent({ type: "open.path", payload: { path, cwd: customEvent.detail?.cwd } });
+        return;
+      }
+      setPendingPreviewPath(path);
+      setShowFileBrowser(true);
+    };
+
+    window.addEventListener("valedesk:preview-file", handlePreviewFile as EventListener);
+    return () => {
+      window.removeEventListener("valedesk:preview-file", handlePreviewFile as EventListener);
+    };
+  }, [activeSession?.cwd, apiSettings?.useBuiltinViewer]);
+
+  useEffect(() => {
+    if (!openWorkflowMenuId) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!workflowMenuRef.current?.contains(event.target as Node)) {
+        setOpenWorkflowMenuId(null);
+      }
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setOpenWorkflowMenuId(null);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [openWorkflowMenuId]);
+
+  useEffect(() => {
+    if (!showWorkflowPanel) return;
+    const handlePointerDown = (event: MouseEvent) => {
+      if (!workflowPanelRef.current?.contains(event.target as Node)) {
+        setShowWorkflowPanel(false);
+      }
+    };
+    const handleEscape = (event: KeyboardEvent) => {
+      if (event.key === "Escape") {
+        setShowWorkflowPanel(false);
+      }
+    };
+    document.addEventListener("mousedown", handlePointerDown);
+    document.addEventListener("keydown", handleEscape);
+    return () => {
+      document.removeEventListener("mousedown", handlePointerDown);
+      document.removeEventListener("keydown", handleEscape);
+    };
+  }, [showWorkflowPanel, setShowWorkflowPanel]);
 
   useEffect(() => {
     if (connected) {
       sendEvent({ type: "session.list" });
-      sendEvent({ type: "miniworkflow.list", payload: { cwd: activeSession?.cwd, global: true, includeArchived: showArchivedWorkflows } });
+      sendEvent({ type: "miniworkflow.list", payload: { cwd: activeSession?.cwd, global: true, includeArchived: true } });
       sendEvent({ type: "settings.get" });
       sendEvent({ type: "models.get" });
       sendEvent({ type: "llm.providers.get" });
@@ -610,7 +722,7 @@ function App() {
   const anyCwd = activeSession?.cwd || Object.values(sessions).find(s => s.cwd)?.cwd;
   useEffect(() => {
     if (connected && anyCwd) {
-      sendEvent({ type: "miniworkflow.list", payload: { cwd: anyCwd, global: true, includeArchived: showArchivedWorkflows } });
+      sendEvent({ type: "miniworkflow.list", payload: { cwd: anyCwd, global: true, includeArchived: true } });
     }
   }, [connected, activeSessionId, anyCwd, sendEvent, showArchivedWorkflows]);
 
@@ -753,7 +865,7 @@ function App() {
   const lastScrollTimeRef = useRef<number>(0);
 
   useEffect(() => {
-    if (!showPartialMessage || !partialMessage || !autoScrollEnabled || isUserScrolledUpRef.current) return;
+    if (!showSessionPartialMessage || !partialMessage || !autoScrollEnabled || isUserScrolledUpRef.current) return;
 
     const container = messagesContainerRef.current;
     if (!container) return;
@@ -765,7 +877,7 @@ function App() {
       // Force scroll to bottom immediately for long messages
       container.scrollTop = container.scrollHeight;
     }
-  }, [showPartialMessage, partialMessage, autoScrollEnabled]);
+  }, [showSessionPartialMessage, partialMessage, autoScrollEnabled]);
 
   // Scroll handling for paginated history loads
   useEffect(() => {
@@ -922,15 +1034,6 @@ function App() {
     setShowRoleGroupDialog(false);
   }, [sendEvent, setGlobalError]);
 
-  const handleDistillWorkflow = useCallback(() => {
-    if (!activeSessionId) return;
-    // Pre-set model from session
-    const sessionModel = activeSession?.model || "";
-    setDistillConfigModel(sessionModel);
-    setDistillConfigMaxCycles(3);
-    setShowDistillConfig(true);
-  }, [activeSessionId, activeSession]);
-
   const handleDistillStart = useCallback((model: string, maxCycles: number) => {
     if (!activeSessionId) return;
     setShowDistillConfig(false);
@@ -982,6 +1085,13 @@ function App() {
       : !hasToolUseInMessages
         ? t("valeApps.hintNoToolCalls")
         : undefined;
+  const visibleMiniWorkflows = miniWorkflows.filter((wf) => {
+    if ((wf as any).status === "archived" && !showArchivedWorkflows) return false;
+    const q = workflowFilter.trim().toLowerCase();
+    if (!q) return true;
+    const tags = (wf.tags || []).join(" ").toLowerCase();
+    return wf.name.toLowerCase().includes(q) || wf.description.toLowerCase().includes(q) || tags.includes(q);
+  });
 
   return (
     <I18nProvider
@@ -1000,7 +1110,7 @@ function App() {
         apiSettings={apiSettings}
       />
 
-      <main className={`flex flex-1 flex-col ml-[280px] bg-surface-cream overflow-hidden ${showWorkflowPanel ? "mr-[320px]" : ""}`}>
+      <main className="flex flex-1 flex-col ml-[280px] bg-surface-cream overflow-hidden">
         <AppHeader
           activeSessionId={activeSessionId}
           setShowSessionEditModal={setShowSessionEditModal}
@@ -1019,7 +1129,7 @@ function App() {
         <div ref={messagesContainerRef} id="messages-container" className={`flex-1 overflow-y-auto overflow-x-hidden px-8 pt-6 min-w-0 ${activeSession?.todos && activeSession.todos.length > 0 ? 'pb-4' : 'pb-40'}`}>
           <div className="mx-auto w-full max-w-4xl min-w-0">
             {messages.length === 0 ? (
-              <AppEmptyState />
+              showRunningEmptyState ? <AppRunningState /> : <AppEmptyState />
             ) : (
               messages.map((msg, idx) => (
                 <MessageCard
@@ -1042,8 +1152,8 @@ function App() {
 
             {/* Partial message display with skeleton loading */}
             <div className="partial-message">
-              <MDContent text={partialMessage} />
-              {showPartialMessage && (
+              {showSessionPartialMessage && <MDContent text={partialMessage} />}
+              {showSessionPartialMessage && (
                 <div className="mt-3 flex flex-col gap-2 px-1">
                   <div className="relative h-3 w-2/12 overflow-hidden rounded-full bg-ink-900/10">
                     <div className="absolute inset-0 -translate-x-full bg-gradient-to-r from-transparent via-ink-900/30 to-transparent animate-shimmer" />
@@ -1083,11 +1193,16 @@ function App() {
 
         <PromptInput
           sendEvent={sendEvent}
-          workflowPanelOpen={showWorkflowPanel}
+          forcedRunningSessionId={forcedRunningSessionId}
         />
       </main>
 
+      {showWorkflowPanel && (
+        <div className="fixed inset-y-0 left-[280px] right-0 z-[65] bg-ink-900/0" onClick={() => setShowWorkflowPanel(false)} />
+      )}
+
       <aside
+        ref={workflowPanelRef}
         className={`fixed inset-y-0 right-0 z-[70] w-[320px] border-l border-ink-900/10 bg-[#FAF9F6] px-3 pt-3 pb-3 flex flex-col overflow-y-auto transition-transform duration-200 ease-out ${
           showWorkflowPanel ? "translate-x-0" : "translate-x-full pointer-events-none"
         }`}
@@ -1116,19 +1231,13 @@ function App() {
             />
             {t("valeApps.showArchived")}
           </label>
-          {miniWorkflows.length === 0 ? (
+          {visibleMiniWorkflows.length === 0 ? (
             <div className="rounded-lg border border-ink-900/10 bg-white p-3 text-xs text-muted">
               {t("valeApps.noWorkflows")}
             </div>
           ) : (
             <div className="space-y-2">
-              {miniWorkflows
-                .filter((wf) => {
-                  const q = workflowFilter.trim().toLowerCase();
-                  if (!q) return true;
-                  const tags = (wf.tags || []).join(" ").toLowerCase();
-                  return wf.name.toLowerCase().includes(q) || wf.description.toLowerCase().includes(q) || tags.includes(q);
-                })
+              {visibleMiniWorkflows
                 .map((wf) => {
                   const isDraft = (wf as any).status === "draft";
                   const isArchived = (wf as any).status === "archived";
@@ -1161,9 +1270,12 @@ function App() {
                       </div>
                       <div className="text-[11px] text-muted">v{wf.version} - inputs: {wf.inputs_count}</div>
                     </div>
-                    <div className="relative">
+                    <div
+                      ref={openWorkflowMenuId === wf.id ? workflowMenuRef : null}
+                      className="relative"
+                    >
                       <button
-                        className="rounded-md border border-ink-900/10 px-2 py-1 text-[11px] text-ink-600 hover:bg-ink-100"
+                        className="rounded-md border border-ink-900/10 bg-white px-2 py-1 text-[11px] text-ink-600 transition-colors hover:border-ink-900/20 hover:bg-ink-100 active:bg-ink-200"
                         onClick={() => setOpenWorkflowMenuId((prev) => prev === wf.id ? null : wf.id)}
                       >
                         ...
@@ -1171,7 +1283,7 @@ function App() {
                       {openWorkflowMenuId === wf.id && (
                         <div className="absolute right-0 top-7 z-20 min-w-[140px] rounded-lg border border-ink-900/10 bg-white p-1 shadow-lg">
                           <button
-                            className="block w-full rounded px-2 py-1 text-left text-xs text-ink-700 hover:bg-ink-100"
+                            className={WORKFLOW_MENU_ITEM_CLASS}
                             onClick={() => {
                               setPendingWorkflowAction("edit");
                               sendEvent({ type: "miniworkflow.get", payload: { workflowId: wf.id, cwd: activeSession?.cwd } });
@@ -1183,7 +1295,7 @@ function App() {
                           </button>
                           {isArchived ? (
                             <button
-                              className="block w-full rounded px-2 py-1 text-left text-xs text-ink-700 hover:bg-ink-100"
+                              className={WORKFLOW_MENU_ITEM_CLASS}
                               onClick={() => {
                                 sendEvent({ type: "miniworkflow.restore", payload: { workflowId: wf.id, cwd: activeSession?.cwd } });
                                 setOpenWorkflowMenuId(null);
@@ -1193,7 +1305,7 @@ function App() {
                             </button>
                           ) : (
                             <button
-                              className="block w-full rounded px-2 py-1 text-left text-xs text-ink-700 hover:bg-ink-100"
+                              className={WORKFLOW_MENU_ITEM_CLASS}
                               onClick={() => {
                                 sendEvent({ type: "miniworkflow.archive", payload: { workflowId: wf.id, cwd: activeSession?.cwd } });
                                 setOpenWorkflowMenuId(null);
@@ -1219,7 +1331,7 @@ function App() {
                   <div className="mt-2 flex items-center justify-end">
                     {isArchived ? (
                       <button
-                        className="rounded-md border border-ink-900/10 bg-white px-2.5 py-1.5 text-xs text-ink-700 hover:bg-ink-100"
+                        className={`${SECONDARY_BUTTON_CLASS} rounded-md px-2.5 py-1.5 text-xs`}
                         onClick={() => {
                           sendEvent({ type: "miniworkflow.restore", payload: { workflowId: wf.id, cwd: activeSession?.cwd } });
                         }}
@@ -1345,7 +1457,7 @@ function App() {
             </label>
             <div className="flex justify-end gap-2 pt-2">
               <button
-                className="rounded-lg border border-ink-900/20 bg-ink-100 px-3 py-1.5 text-xs text-ink-700 hover:bg-ink-200"
+                className={SECONDARY_BUTTON_SM_CLASS}
                 onClick={() => setShowDistillConfig(false)}
               >
                 {t("distillConfig.cancel")}
@@ -1370,7 +1482,6 @@ function App() {
           distillUsage={distillUsage}
           distillProgress={distillProgress}
           activeSessionId={distillSessionId}
-          activeSessionCwd={activeSession?.cwd}
           onClose={() => {
             setDistillSessionId(null);
             setDistillWorkflow(null);
@@ -1389,10 +1500,18 @@ function App() {
             setDistillDebugLogPath(null);
           } : undefined}
           onSave={(wf, status) => {
+            const reviewFields = {
+              last_review_verification: replayVerification || wf.last_review_verification,
+              last_review_artifacts: replayArtifacts || wf.last_review_artifacts,
+              last_review_cycles: verifyCycles || wf.last_review_cycles,
+            };
+            const workflowToSave: MiniWorkflow = status === "draft"
+              ? { ...wf, ...reviewFields, status, debug_log_path: distillDebugLogPath || wf.debug_log_path }
+              : { ...wf, ...reviewFields, status, debug_log_path: undefined };
             sendEvent({
               type: "miniworkflow.save",
               payload: {
-                workflow: { ...wf, status },
+                workflow: workflowToSave,
                 scope: activeSession?.cwd ? "project" : "global",
                 cwd: activeSession?.cwd
               }
@@ -1427,24 +1546,23 @@ function App() {
           <div className="w-full max-w-lg rounded-xl border border-ink-900/10 bg-white p-4 shadow-xl">
             <div className="mb-3 flex items-center justify-between">
               <h3 className="text-sm font-semibold text-ink-800">{t("runWorkflow.title", { name: runWorkflow.name })}</h3>
-              <button className="rounded-md border border-ink-900/10 px-2 py-1 text-xs text-ink-600 hover:bg-ink-100" onClick={() => setRunWorkflow(null)}>
+              <button className={SECONDARY_BUTTON_XS_CLASS} onClick={() => setRunWorkflow(null)}>
                 {t("runWorkflow.close")}
               </button>
             </div>
             <div className="mb-3">
               <label className="block text-xs text-ink-700 font-medium mb-1">{t("runWorkflow.model")}</label>
               {(() => {
-                const enabledModels = llmModels.filter(m => m.enabled !== false);
-                if (enabledModels.length === 0) {
+                if (enabledLlmModels.length === 0) {
                   return <p className="text-xs text-ink-500">{t("runWorkflow.noModels")}</p>;
                 }
                 return (
                   <select
                     className="w-full rounded-lg border border-ink-900/10 px-2 py-1.5 text-sm"
-                    value={runModel || enabledModels[0]?.id || ""}
+                    value={runModel}
                     onChange={(e) => setRunModel(e.target.value)}
                   >
-                    {enabledModels.map((m) => (
+                    {enabledLlmModels.map((m) => (
                       <option key={m.id} value={m.id}>{m.name} ({llmProviders.find(p => p.id === m.providerId)?.name || m.providerType})</option>
                     ))}
                   </select>
@@ -1467,20 +1585,21 @@ function App() {
               ))}
             </div>
             <div className="mt-4 flex justify-end gap-2">
-              <button className="rounded-lg border border-ink-900/10 px-3 py-1.5 text-xs text-ink-700 hover:bg-ink-100" onClick={() => setRunWorkflow(null)}>
+              <button className={SECONDARY_BUTTON_SM_CLASS} onClick={() => setRunWorkflow(null)}>
                 {t("runWorkflow.cancel")}
               </button>
               <button
                 className={`rounded-lg px-3 py-1.5 text-xs text-white ${
-                  runWorkflow.inputs.some((input) => input.required && !String(runInputs[input.id] ?? "").trim())
+                  !runModel || runWorkflow.inputs.some((input) => !isWorkflowInputFilled(input, runInputs[input.id] ?? ""))
                     ? "bg-ink-400 cursor-not-allowed"
                     : "bg-accent hover:bg-accent-hover"
                 }`}
+                disabled={!runModel || runWorkflow.inputs.some((input) => !isWorkflowInputFilled(input, runInputs[input.id] ?? ""))}
                 onClick={() => {
-                  if (runWorkflow.inputs.some((input) => input.required && !String(runInputs[input.id] ?? "").trim())) return;
+                  if (!runModel || runWorkflow.inputs.some((input) => !isWorkflowInputFilled(input, runInputs[input.id] ?? ""))) return;
                   sendEvent({
                     type: "miniworkflow.replay",
-                    payload: { workflowId: runWorkflow.id, inputs: runInputs, cwd: activeSession?.cwd, model: runModel || undefined }
+                    payload: { workflowId: runWorkflow.id, inputs: runInputs, cwd: activeSession?.cwd, model: runModel }
                   });
                   setRunWorkflow(null);
                 }}
@@ -1500,11 +1619,11 @@ function App() {
               {t("valeApps.deleteConfirm", { name: deleteWorkflowCandidate.name })}
             </p>
             <div className="mt-4 flex justify-end gap-2">
-              <button
-                className="rounded-lg border border-ink-900/10 px-3 py-1.5 text-xs text-ink-700 hover:bg-ink-100"
-                onClick={() => setDeleteWorkflowCandidate(null)}
-              >
-                {t("distillConfig.cancel")}
+                <button
+                  className={SECONDARY_BUTTON_SM_CLASS}
+                  onClick={() => setDeleteWorkflowCandidate(null)}
+                >
+                  {t("distillConfig.cancel")}
               </button>
               <button
                 className="rounded-lg bg-error px-3 py-1.5 text-xs text-white hover:bg-error/90"
@@ -1537,8 +1656,12 @@ function App() {
       {showFileBrowser && activeSession?.cwd && (
         <FileBrowser
           cwd={activeSession.cwd}
-          onClose={() => setShowFileBrowser(false)}
+          onClose={() => {
+            setShowFileBrowser(false);
+            setPendingPreviewPath(null);
+          }}
           useBuiltinViewer={apiSettings?.useBuiltinViewer ?? true}
+          initialPreviewPath={pendingPreviewPath}
         />
       )}
 

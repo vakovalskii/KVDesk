@@ -20,7 +20,6 @@ type DistillPanelProps = {
   distillUsage: { input_tokens: number; output_tokens: number } | null;
   distillProgress: { step: number; totalSteps: number; label: string } | null;
   activeSessionId: string | null;
-  activeSessionCwd?: string;
   onClose: () => void;
   onCancel?: () => void;
   onSave: (workflow: MiniWorkflow, status: "published" | "draft") => void;
@@ -32,6 +31,10 @@ type DistillPanelProps = {
   verifyCycles?: { used: number; max: number } | null;
   debugLogPath?: string | null;
 };
+
+const SECONDARY_BUTTON_CLASS = "rounded-lg border border-ink-900/10 bg-white text-ink-700 transition-colors hover:border-ink-900/20 hover:bg-ink-100 active:bg-ink-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-ink-900/10 disabled:hover:bg-white";
+const SECONDARY_BUTTON_SM_CLASS = `${SECONDARY_BUTTON_CLASS} px-3 py-1.5 text-xs`;
+const SECONDARY_BUTTON_XS_CLASS = `${SECONDARY_BUTTON_CLASS} px-2 py-1 text-xs`;
 
 // ─── Left panel: editable chain steps ───
 
@@ -218,11 +221,13 @@ function ChatPanel({
   onUpdateWorkflow,
   sendEvent,
   sessionId,
+  onBusyChange,
 }: {
   workflow: MiniWorkflow;
   onUpdateWorkflow: (wf: MiniWorkflow) => void;
   sendEvent: (event: any) => void;
   sessionId: string;
+  onBusyChange?: (busy: boolean) => void;
 }) {
   const { t } = useI18n();
   const [messages, setMessages] = useState<ChatMessage[]>([]);
@@ -236,6 +241,10 @@ function ChatPanel({
       scrollRef.current.scrollTop = scrollRef.current.scrollHeight;
     }
   }, [messages]);
+
+  useEffect(() => {
+    onBusyChange?.(loading);
+  }, [loading, onBusyChange]);
 
   const handleSend = useCallback(() => {
     if (!input.trim() || loading) return;
@@ -357,7 +366,6 @@ export default function DistillPanel({
   distillUsage,
   distillProgress,
   activeSessionId,
-  activeSessionCwd,
   onClose,
   onCancel,
   onSave,
@@ -372,6 +380,7 @@ export default function DistillPanel({
   const { t } = useI18n();
   const [showCancelConfirm, setShowCancelConfirm] = useState(false);
   const [verifyBusy, setVerifyBusy] = useState<"verify" | "fix" | null>(null);
+  const [chatBusy, setChatBusy] = useState(false);
   const cancelNoButtonRef = useRef<HTMLButtonElement | null>(null);
 
   useEffect(() => {
@@ -397,10 +406,13 @@ export default function DistillPanel({
   const handleCloseRequest = useCallback(() => {
     if (distillLoading && onCancel) {
       setShowCancelConfirm(true);
+    } else if (chatBusy) {
+      sendEvent({ type: "miniworkflow.refine.cancel", payload: { sessionId: activeSessionId } });
+      onClose();
     } else {
       onClose();
     }
-  }, [distillLoading, onCancel, onClose]);
+  }, [activeSessionId, chatBusy, distillLoading, onCancel, onClose, sendEvent]);
 
   const handleConfirmCancel = useCallback(() => {
     setShowCancelConfirm(false);
@@ -419,6 +431,8 @@ export default function DistillPanel({
   }, [handleDismissCancel]);
 
   const isCompactMode = distillLoading && !distillWorkflow;
+  const actionLocked = distillLoading || verifyBusy !== null || chatBusy;
+  const closeLocked = distillLoading || verifyBusy !== null;
 
   return (
     <div className="fixed inset-0 z-[80] bg-ink-900/40 flex items-center justify-center p-4">
@@ -445,16 +459,18 @@ export default function DistillPanel({
               )}
               {debugLogPath && (
                 <button
-                  className="rounded-md border border-ink-900/10 px-2 py-1 text-xs text-ink-600 hover:bg-ink-100"
+                  className={SECONDARY_BUTTON_XS_CLASS}
                   onClick={() => getPlatform().sendClientEvent({ type: "open.path", payload: { path: debugLogPath } })}
                   title={debugLogPath}
+                  disabled={actionLocked}
                 >
                   {t("distill.debugLog")}
                 </button>
               )}
               <button
-                className="rounded-md border border-ink-900/10 px-2 py-1 text-xs text-ink-600 hover:bg-ink-100"
+                className={SECONDARY_BUTTON_XS_CLASS}
                 onClick={handleCloseRequest}
+                disabled={closeLocked}
               >
                 {t("distill.close")}
               </button>
@@ -511,8 +527,9 @@ export default function DistillPanel({
                     </ul>
                     <div className="flex justify-end">
                       <button
-                        className="rounded-lg px-3 py-1.5 text-xs text-white bg-accent hover:bg-accent-hover"
+                        className="rounded-lg bg-accent px-3 py-1.5 text-xs text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
                         onClick={() => onRetry(distillQuestions)}
+                        disabled={actionLocked}
                       >
                         {t("distill.retryDistill")}
                       </button>
@@ -589,7 +606,7 @@ export default function DistillPanel({
                               onSetWorkflow({ ...distillWorkflow, inputs: next });
                             }}
                           >
-                            {["string", "text", "number", "boolean", "enum", "date", "datetime", "file_path", "directory", "url", "secret"].map((t) => (
+                            {["string", "text", "number", "boolean", "enum", "date", "datetime", "period", "file_path", "directory", "url", "secret"].map((t) => (
                               <option key={t} value={t}>{t}</option>
                             ))}
                           </select>
@@ -666,13 +683,13 @@ export default function DistillPanel({
                     <div className="flex gap-2 pt-1">
                       <button
                         type="button"
-                        disabled={distillLoading || verifyBusy !== null}
+                        disabled={actionLocked}
                         onClick={() => {
                           if (!activeSessionId || !distillWorkflow) return;
                           setVerifyBusy("verify");
                           sendEvent({ type: "miniworkflow.verify", payload: { sessionId: activeSessionId, workflow: distillWorkflow } });
                         }}
-                        className="px-2.5 py-1 rounded text-[11px] font-medium border border-ink-900/15 bg-surface-secondary hover:bg-surface-tertiary text-ink-600 disabled:opacity-50 transition-colors inline-flex items-center gap-1.5"
+                        className="inline-flex items-center gap-1.5 rounded border border-ink-900/10 bg-white px-2.5 py-1 text-[11px] font-medium text-ink-700 transition-colors hover:border-ink-900/20 hover:bg-ink-100 active:bg-ink-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-ink-900/10 disabled:hover:bg-white"
                       >
                         {verifyBusy === "verify" && (
                           <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-400 border-t-transparent animate-spin" />
@@ -682,7 +699,7 @@ export default function DistillPanel({
                       {!replayVerification.match && replayVerification.discrepancies.length > 0 && (
                         <button
                           type="button"
-                          disabled={distillLoading || verifyBusy !== null}
+                          disabled={actionLocked}
                           onClick={() => {
                             if (!activeSessionId || !distillWorkflow) return;
                             setVerifyBusy("fix");
@@ -696,7 +713,7 @@ export default function DistillPanel({
                               },
                             });
                           }}
-                          className="px-2.5 py-1 rounded text-[11px] font-medium border border-amber-300 bg-amber-50 hover:bg-amber-100 text-amber-800 disabled:opacity-50 transition-colors inline-flex items-center gap-1.5"
+                          className="inline-flex items-center gap-1.5 rounded border border-ink-900/10 bg-white px-2.5 py-1 text-[11px] font-medium text-ink-700 transition-colors hover:border-ink-900/20 hover:bg-ink-100 active:bg-ink-200 disabled:cursor-not-allowed disabled:opacity-50 disabled:hover:border-ink-900/10 disabled:hover:bg-white"
                         >
                           {verifyBusy === "fix" && (
                             <span className="inline-block h-3 w-3 rounded-full border-2 border-amber-700 border-t-transparent animate-spin" />
@@ -796,16 +813,18 @@ export default function DistillPanel({
                 {/* Actions */}
                 <div className="flex justify-end gap-2 pt-2">
                   <button
-                    className="rounded-lg bg-accent px-3 py-1.5 text-xs text-white hover:bg-accent-hover"
+                    className="rounded-lg bg-accent px-3 py-1.5 text-xs text-white transition-colors hover:bg-accent-hover disabled:cursor-not-allowed disabled:opacity-50"
                     onClick={() => onSave(distillWorkflow, "published")}
                     title={t("distill.publishTooltip")}
+                    disabled={actionLocked}
                   >
                     {t("distill.publish")}
                   </button>
                   <button
-                    className="rounded-lg border border-ink-900/20 bg-ink-100 px-3 py-1.5 text-xs text-ink-700 hover:bg-ink-200"
+                    className={SECONDARY_BUTTON_SM_CLASS}
                     onClick={() => onSave(distillWorkflow, "draft")}
                     title={t("distill.saveDraftTooltip")}
+                    disabled={actionLocked}
                   >
                     {t("distill.saveDraft")}
                   </button>
@@ -823,6 +842,7 @@ export default function DistillPanel({
               onUpdateWorkflow={onSetWorkflow}
               sendEvent={sendEvent}
               sessionId={activeSessionId}
+              onBusyChange={setChatBusy}
             />
           </div>
         )}
@@ -843,7 +863,7 @@ export default function DistillPanel({
             </div>
             <div className="mt-4 flex justify-end gap-2">
               <button
-                className="rounded-lg border border-ink-900/20 bg-white px-3 py-1.5 text-xs text-ink-700 hover:bg-ink-100"
+                className={SECONDARY_BUTTON_SM_CLASS}
                 onClick={handleConfirmCancel}
               >
                 {t("distill.cancelConfirmYes")}
