@@ -2975,12 +2975,12 @@ async function handleClientEvent(event: ClientEvent) {
             finalizeReplayLog("aborted");
             sessions.setAbortController(session.id, undefined);
             runnerHandles.delete(session.id);
-            sessions.updateSession(session.id, { status: "idle" });
+            sessions.updateSession(session.id, { status: "completed" });
             emit({
               type: "session.status",
               payload: {
                 sessionId: session.id,
-                status: "idle",
+                status: "completed",
                 title: session.title,
                 cwd: session.cwd,
                 model: session.model

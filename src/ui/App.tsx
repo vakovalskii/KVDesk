@@ -627,7 +627,7 @@ function App() {
     if (
       event.type === "session.status"
       && event.payload.sessionId === forcedRunningSessionId
-      && (event.payload.status === "completed" || event.payload.status === "error" || event.payload.status === "idle")
+      && (event.payload.status === "completed" || event.payload.status === "error")
     ) {
       setForcedRunningSessionId(null);
     }
