@@ -375,6 +375,7 @@ export type ClientEvent =
   | { type: "miniworkflow.refine"; payload: { sessionId: string; workflow: MiniWorkflow; userMessage: string } }
   | { type: "miniworkflow.refine.cancel"; payload: { sessionId: string } }
   | { type: "miniworkflow.verify"; payload: { sessionId: string; workflow: MiniWorkflow } }
+  | { type: "miniworkflow.verify.cancel"; payload: { sessionId: string } }
   | { type: "miniworkflow.fix-discrepancies"; payload: { sessionId: string; workflow: MiniWorkflow; discrepancies: string[]; suggestions: string[] } }
   // Compact events
   | { type: "session.compact"; payload: { sessionId: string } }

@@ -90,6 +90,7 @@ sessions.setSyncCallback((type, sessionId, data) => {
 const runnerHandles = new Map<string, RunnerHandle>();
 const stoppedSessionIds = new Set<string>();
 const refineAbortControllers = new Map<string, AbortController>();
+const verifyAbortControllers = new Map<string, AbortController>();
 const multiThreadTasks = new Map<string, any>();
 const STEP_OUTPUT_DIR = "__miniapp_steps";
 
@@ -1475,7 +1476,7 @@ interface FullReplayResult {
 async function runFullReplay(
   workflow: any,
   workspaceDir: string,
-  options?: { model?: string; silent?: boolean }
+  options?: { model?: string; silent?: boolean; signal?: AbortSignal }
 ): Promise<FullReplayResult> {
   const silent = options?.silent ?? false;
 
@@ -1495,6 +1496,24 @@ async function runFullReplay(
     model: options?.model || undefined,
     ephemeral: silent
   });
+  const replayAbortController = new AbortController();
+  sessions.setAbortController(session.id, replayAbortController);
+  const abortReplay = () => {
+    stoppedSessionIds.add(session.id);
+    replayAbortController.abort();
+    const handle = runnerHandles.get(session.id);
+    if (handle) {
+      handle.abort();
+      runnerHandles.delete(session.id);
+    }
+  };
+  if (options?.signal) {
+    if (options.signal.aborted) {
+      abortReplay();
+    } else {
+      options.signal.addEventListener("abort", abortReplay, { once: true });
+    }
+  }
   sessions.updateSession(session.id, { status: "running" });
 
   if (!silent) {
@@ -1523,6 +1542,9 @@ async function runFullReplay(
     const execFileAsync = promisify(execFile);
 
     for (const step of scriptSteps) {
+      if (replayAbortController.signal.aborted) {
+        throw new Error("__SESSION_STOPPED__");
+      }
       try {
         const SAFE_ENV_KEYS = new Set(["PATH", "HOME", "USERPROFILE", "TEMP", "TMP", "TMPDIR", "LANG", "SYSTEMROOT", "COMSPEC", "SHELL", "PYTHONPATH", "PYTHONHOME", "HOMEDRIVE", "HOMEPATH", "APPDATA", "LOCALAPPDATA", "PROGRAMFILES", "WINDIR"]);
         const SECRET_PATTERNS = /(_KEY|_SECRET|_TOKEN|_PASSWORD|_CREDENTIAL|_AUTH)$|^(OPENAI|ANTHROPIC|TAVILY|ZAI|AWS_|AZURE_|GOOGLE_|GITHUB_TOKEN|NPM_TOKEN|CODEX_)/i;
@@ -1542,13 +1564,17 @@ async function runFullReplay(
           cwd: workspaceDir,
           env,
           timeout: 120_000,
-          maxBuffer: 10 * 1024 * 1024
+          maxBuffer: 10 * 1024 * 1024,
+          signal: replayAbortController.signal
         });
         const scriptOutput = (stdout || "").trim();
         const persisted = await persistStepOutput(workspaceDir, step, scriptOutput);
         scriptResults[step.id] = scriptOutput;
         stepDisplayResults[step.id] = persisted.compactResult;
       } catch (err: any) {
+        if (replayAbortController.signal.aborted || err?.name === "AbortError") {
+          throw new Error("__SESSION_STOPPED__");
+        }
         scriptErrors[step.id] = err.message || String(err);
         scriptResults[step.id] = `[SCRIPT ERROR: ${err.message}]`;
         stepDisplayResults[step.id] = scriptResults[step.id];
@@ -1563,6 +1589,19 @@ async function runFullReplay(
     return new Promise((resolve, reject) => {
       let collectedText = "";
       let stepCompleted = false;
+      const abortStep = () => {
+        if (stepCompleted) return;
+        stepCompleted = true;
+        reject(new Error("__SESSION_STOPPED__"));
+      };
+      if (replayAbortController.signal.aborted) {
+        abortStep();
+        return;
+      }
+      replayAbortController.signal.addEventListener("abort", abortStep, { once: true });
+      const cleanupAbortListener = () => {
+        replayAbortController.signal.removeEventListener("abort", abortStep);
+      };
 
       const stepEmit = (serverEvent: ServerEvent) => {
         if (!silent) emit(serverEvent);
@@ -1589,14 +1628,26 @@ async function runFullReplay(
         }
         if (serverEvent.type === "session.status" && serverEvent.payload.sessionId === session.id) {
           if (serverEvent.payload.status === "completed" || serverEvent.payload.status === "idle") {
-            if (!stepCompleted) { stepCompleted = true; resolve(collectedText.trim()); }
+            if (!stepCompleted) {
+              stepCompleted = true;
+              cleanupAbortListener();
+              resolve(collectedText.trim());
+            }
           }
           if (serverEvent.payload.status === "error") {
-            if (!stepCompleted) { stepCompleted = true; reject(new Error(`Step "${stepTitle}" failed`)); }
+            if (!stepCompleted) {
+              stepCompleted = true;
+              cleanupAbortListener();
+              reject(new Error(`Step "${stepTitle}" failed`));
+            }
           }
         }
         if (serverEvent.type === "runner.error" && serverEvent.payload.sessionId === session.id) {
-          if (!stepCompleted) { stepCompleted = true; reject(new Error(serverEvent.payload.message)); }
+          if (!stepCompleted) {
+            stepCompleted = true;
+            cleanupAbortListener();
+            reject(new Error(serverEvent.payload.message));
+          }
         }
       };
 
@@ -1610,11 +1661,20 @@ async function runFullReplay(
         onSessionUpdate: (updates: any) => { sessions.updateSession(session.id, updates); }
       } as any)
         .then((handle: any) => { runnerHandles.set(session.id, handle); })
-        .catch((error: any) => { if (!stepCompleted) { stepCompleted = true; reject(error); } });
+        .catch((error: any) => {
+          if (!stepCompleted) {
+            stepCompleted = true;
+            cleanupAbortListener();
+            reject(error);
+          }
+        });
     });
   };
 
   for (let i = 0; i < llmSteps.length; i++) {
+    if (replayAbortController.signal.aborted) {
+      throw new Error("__SESSION_STOPPED__");
+    }
     const step = llmSteps[i];
     const stepPrompt = buildStepPrompt(workflow, step, i, llmSteps.length, inputs, allStepResults);
     sessions.updateSession(session.id, { lastPrompt: stepPrompt, status: "running" });
@@ -1641,9 +1701,17 @@ async function runFullReplay(
   } catch { /* ignore */ }
 
   if (silent) {
+    if (options?.signal) {
+      options.signal.removeEventListener("abort", abortReplay);
+    }
+    sessions.setAbortController(session.id, undefined);
     runnerHandles.delete(session.id);
     sessions.deleteSession(session.id);
   } else {
+    if (options?.signal) {
+      options.signal.removeEventListener("abort", abortReplay);
+    }
+    sessions.setAbortController(session.id, undefined);
     sessions.updateSession(session.id, { status: "completed" });
     emit({ type: "session.status", payload: { sessionId: session.id, status: "completed" } } as any);
   }
@@ -1655,7 +1723,7 @@ async function runAgentVerification(
   workflow: any,
   replayResult: FullReplayResult,
   workspaceDir: string,
-  options?: { model?: string; debugLog?: DistillDebugLog; debugStep?: string }
+  options?: { model?: string; debugLog?: DistillDebugLog; debugStep?: string; signal?: AbortSignal }
 ): Promise<VerifyResult> {
   const prompt = buildVerificationPrompt(workflow, replayResult);
 
@@ -1669,9 +1737,30 @@ async function runAgentVerification(
   });
   sessions.updateSession(session.id, { status: "running" });
 
-  return new Promise((resolve) => {
+  return new Promise((resolve, reject) => {
     let collectedText = "";
     let completed = false;
+    const abortVerification = () => {
+      if (completed) return;
+      completed = true;
+      const handle = runnerHandles.get(session.id);
+      if (handle) {
+        handle.abort();
+        runnerHandles.delete(session.id);
+      }
+      sessions.setAbortController(session.id, undefined);
+      sessions.deleteSession(session.id);
+      const abortError = new Error("Request cancelled.");
+      (abortError as any).name = "AbortError";
+      reject(abortError);
+    };
+    if (options?.signal) {
+      if (options.signal.aborted) {
+        abortVerification();
+        return;
+      }
+      options.signal.addEventListener("abort", abortVerification, { once: true });
+    }
 
     const onEvent = (serverEvent: ServerEvent) => {
       if (serverEvent.type === "stream.message" && serverEvent.payload.sessionId === session.id) {
@@ -1695,7 +1784,11 @@ async function runAgentVerification(
         if (serverEvent.payload.status === "error" && !completed) {
           completed = true;
           runnerHandles.delete(session.id);
+          sessions.setAbortController(session.id, undefined);
           sessions.deleteSession(session.id);
+          if (options?.signal) {
+            options.signal.removeEventListener("abort", abortVerification);
+          }
           resolve({
             match: false,
             summary: `Verification agent error`,
@@ -1714,6 +1807,10 @@ async function runAgentVerification(
         output_tokens: sessions.getSession(session.id)?.outputTokens || 0
       };
 
+      if (options?.signal) {
+        options.signal.removeEventListener("abort", abortVerification);
+      }
+      sessions.setAbortController(session.id, undefined);
       runnerHandles.delete(session.id);
       sessions.deleteSession(session.id);
 
@@ -2287,10 +2384,13 @@ async function handleClientEvent(event: ClientEvent) {
     case "miniworkflow.verify": {
       const { sessionId: verifySessionId, workflow: verifyWorkflow } = (event as any).payload;
       try {
+        verifyAbortControllers.get(verifySessionId)?.abort();
+        const verifyAbortController = new AbortController();
+        verifyAbortControllers.set(verifySessionId, verifyAbortController);
         const verifyModel = verifyWorkflow.source_model;
         const testDir = join(getDataDir(), "distill-verify", verifySessionId);
-        const replayResult = await runFullReplay(verifyWorkflow, testDir, { model: verifyModel, silent: true });
-        const verification = await runAgentVerification(verifyWorkflow, replayResult, testDir, { model: verifyModel });
+        const replayResult = await runFullReplay(verifyWorkflow, testDir, { model: verifyModel, silent: true, signal: verifyAbortController.signal });
+        const verification = await runAgentVerification(verifyWorkflow, replayResult, testDir, { model: verifyModel, signal: verifyAbortController.signal });
 
         emit({
           type: "miniworkflow.replay.verified",
@@ -2300,6 +2400,9 @@ async function handleClientEvent(event: ClientEvent) {
           }
         } as any);
       } catch (err) {
+        if ((err as any)?.name === "AbortError") {
+          return;
+        }
         emit({
           type: "miniworkflow.replay.verified",
           payload: {
@@ -2307,7 +2410,15 @@ async function handleClientEvent(event: ClientEvent) {
             verification: { match: false, summary: `Ошибка верификации: ${String(err)}`, discrepancies: [String(err)], suggestions: [] }
           }
         } as any);
+      } finally {
+        verifyAbortControllers.delete(verifySessionId);
       }
+      return;
+    }
+    case "miniworkflow.verify.cancel": {
+      const { sessionId: verifySessionId } = (event as any).payload;
+      verifyAbortControllers.get(verifySessionId)?.abort();
+      verifyAbortControllers.delete(verifySessionId);
       return;
     }
     case "miniworkflow.fix-discrepancies": {
@@ -2582,8 +2693,9 @@ async function handleClientEvent(event: ClientEvent) {
           const stepEmit = (serverEvent: ServerEvent) => {
             const msgType = serverEvent.type === "stream.message" ? (serverEvent.payload.message as any)?.type : null;
             const msgSubtype = serverEvent.type === "stream.message" ? (serverEvent.payload.message as any)?.subtype : null;
+            const isInternalReplayStatus = serverEvent.type === "session.status" && serverEvent.payload.sessionId === session.id;
             const shouldForward =
-              serverEvent.type !== "stream.message"
+              (!isInternalReplayStatus && serverEvent.type !== "stream.message")
               || ((msgType !== "assistant" && msgType !== "text" && msgType !== "result" && msgType !== "user")
                 && !(msgType === "system" && msgSubtype === "init"));
             if (shouldForward) {
@@ -2812,6 +2924,7 @@ async function handleClientEvent(event: ClientEvent) {
           sessions.setAbortController(session.id, undefined);
           sessions.updateSession(session.id, { status: "error" });
           emit({ type: "runner.error", payload: { sessionId: session.id, message: String(err) } } as any);
+          emit({ type: "session.status", payload: { sessionId: session.id, status: "error", title: session.title, cwd: session.cwd, model: session.model } } as any);
         }
       })();
       return;

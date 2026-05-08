@@ -406,13 +406,21 @@ export default function DistillPanel({
   const handleCloseRequest = useCallback(() => {
     if (distillLoading && onCancel) {
       setShowCancelConfirm(true);
+    } else if (verifyBusy === "verify") {
+      sendEvent({ type: "miniworkflow.verify.cancel", payload: { sessionId: activeSessionId } });
+      setVerifyBusy(null);
+      onClose();
+    } else if (verifyBusy === "fix") {
+      sendEvent({ type: "miniworkflow.refine.cancel", payload: { sessionId: activeSessionId } });
+      setVerifyBusy(null);
+      onClose();
     } else if (chatBusy) {
       sendEvent({ type: "miniworkflow.refine.cancel", payload: { sessionId: activeSessionId } });
       onClose();
     } else {
       onClose();
     }
-  }, [activeSessionId, chatBusy, distillLoading, onCancel, onClose, sendEvent]);
+  }, [activeSessionId, chatBusy, distillLoading, onCancel, onClose, sendEvent, verifyBusy]);
 
   const handleConfirmCancel = useCallback(() => {
     setShowCancelConfirm(false);
@@ -432,7 +440,7 @@ export default function DistillPanel({
 
   const isCompactMode = distillLoading && !distillWorkflow;
   const actionLocked = distillLoading || verifyBusy !== null || chatBusy;
-  const closeLocked = distillLoading || verifyBusy !== null;
+  const closeLocked = distillLoading;
 
   return (
     <div className="fixed inset-0 z-[80] bg-ink-900/40 flex items-center justify-center p-4">
@@ -683,9 +691,15 @@ export default function DistillPanel({
                     <div className="flex gap-2 pt-1">
                       <button
                         type="button"
-                        disabled={actionLocked}
+                        disabled={verifyBusy === "fix" ? true : (distillLoading || chatBusy)}
                         onClick={() => {
-                          if (!activeSessionId || !distillWorkflow) return;
+                          if (!activeSessionId) return;
+                          if (verifyBusy === "verify") {
+                            sendEvent({ type: "miniworkflow.verify.cancel", payload: { sessionId: activeSessionId } });
+                            setVerifyBusy(null);
+                            return;
+                          }
+                          if (!distillWorkflow) return;
                           setVerifyBusy("verify");
                           sendEvent({ type: "miniworkflow.verify", payload: { sessionId: activeSessionId, workflow: distillWorkflow } });
                         }}
@@ -694,14 +708,20 @@ export default function DistillPanel({
                         {verifyBusy === "verify" && (
                           <span className="inline-block h-3 w-3 rounded-full border-2 border-ink-400 border-t-transparent animate-spin" />
                         )}
-                        {verifyBusy === "verify" ? t("distill.rerunReviewInProgress") : t("distill.rerunReview")}
+                        {verifyBusy === "verify" ? t("distill.cancelBtn") : t("distill.rerunReview")}
                       </button>
                       {!replayVerification.match && replayVerification.discrepancies.length > 0 && (
                         <button
                           type="button"
-                          disabled={actionLocked}
+                          disabled={verifyBusy === "verify" ? true : (distillLoading || chatBusy)}
                           onClick={() => {
-                            if (!activeSessionId || !distillWorkflow) return;
+                            if (!activeSessionId) return;
+                            if (verifyBusy === "fix") {
+                              sendEvent({ type: "miniworkflow.refine.cancel", payload: { sessionId: activeSessionId } });
+                              setVerifyBusy(null);
+                              return;
+                            }
+                            if (!distillWorkflow) return;
                             setVerifyBusy("fix");
                             sendEvent({
                               type: "miniworkflow.fix-discrepancies",
@@ -718,7 +738,7 @@ export default function DistillPanel({
                           {verifyBusy === "fix" && (
                             <span className="inline-block h-3 w-3 rounded-full border-2 border-amber-700 border-t-transparent animate-spin" />
                           )}
-                          {verifyBusy === "fix" ? t("distill.fixDiscrepanciesInProgress") : t("distill.fixDiscrepancies")}
+                          {verifyBusy === "fix" ? t("distill.cancelBtn") : t("distill.fixDiscrepancies")}
                         </button>
                       )}
                     </div>

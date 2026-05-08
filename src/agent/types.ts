@@ -366,7 +366,9 @@ export type ClientEvent =
   | { type: "miniworkflow.delete"; payload: { workflowId: string; scope?: "global" | "project" | "both"; cwd?: string } }
   | { type: "miniworkflow.replay"; payload: { workflowId: string; inputs: Record<string, unknown>; cwd?: string; model?: string } }
   | { type: "miniworkflow.refine"; payload: { sessionId: string; workflow: MiniWorkflow; userMessage: string } }
+  | { type: "miniworkflow.refine.cancel"; payload: { sessionId: string } }
   | { type: "miniworkflow.verify"; payload: { sessionId: string; workflow: MiniWorkflow } }
+  | { type: "miniworkflow.verify.cancel"; payload: { sessionId: string } }
   | { type: "miniworkflow.fix-discrepancies"; payload: { sessionId: string; workflow: MiniWorkflow; discrepancies: string[]; suggestions: string[] } }
   // OAuth events
   | { type: "oauth.login"; payload: { provider: string; method?: 'browser' | 'device_code' | 'token'; token?: string } }

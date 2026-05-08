@@ -340,6 +340,7 @@ const MiniAppStepResultCard = ({
   defaultOpen?: boolean;
   sessionId?: string;
 }) => {
+  const detailsRef = useRef<HTMLDetailsElement | null>(null);
   const structuredData = Boolean(message.fullText && looksLikeStructuredData(message.fullText));
   const formattedStructuredData = structuredData && message.fullText ? formatStructuredData(message.fullText) : message.fullText || "";
   const bodyText = structuredData ? formattedStructuredData : (message.fullText || message.summary);
@@ -361,13 +362,27 @@ const MiniAppStepResultCard = ({
     window.dispatchEvent(previewEvent);
   };
 
+  const handleToggle = () => {
+    if (!detailsRef.current?.open) return;
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => {
+        detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+      });
+    });
+  };
+
   return (
     <div className="flex flex-col gap-2 mt-4 overflow-hidden">
       <div className="header text-accent flex items-center gap-2">
         <StatusDot variant={message.status === "failed" ? "error" : "success"} isActive={showIndicator} isVisible={true} />
         {label}
       </div>
-      <details className="group overflow-hidden rounded-xl border border-ink-900/10 bg-surface-secondary" open={message.status === "failed" || defaultOpen}>
+      <details
+        ref={detailsRef}
+        className="group overflow-hidden rounded-xl border border-ink-900/10 bg-surface-secondary"
+        open={message.status === "failed" || defaultOpen}
+        onToggle={handleToggle}
+      >
         <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2 text-left text-sm text-ink-700 transition-colors hover:bg-ink-900/5">
           <span className="flex-1 truncate">{message.title}</span>
           <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${message.status === "failed" ? "bg-error/10 text-error" : "bg-success/10 text-success"}`}>
