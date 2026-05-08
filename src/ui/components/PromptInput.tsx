@@ -172,7 +172,10 @@ export function PromptInput({ sendEvent, forcedRunningSessionId = null }: Prompt
   }, [prompt]);
 
   return (
-    <section className="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-surface via-surface to-transparent pb-6 px-2 pt-8 lg:pb-8 lg:ml-[280px]">
+    <section
+      data-prompt-input-shell
+      className="fixed bottom-0 left-0 right-0 bg-gradient-to-t from-surface via-surface to-transparent pb-6 px-2 pt-8 lg:pb-8 lg:ml-[280px]"
+    >
       <div className="mx-auto w-full max-w-full">
         <div className="flex w-full items-end gap-3 rounded-2xl border border-ink-900/10 bg-surface px-4 py-3 shadow-card">
           <textarea

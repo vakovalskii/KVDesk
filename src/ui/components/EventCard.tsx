@@ -341,6 +341,7 @@ const MiniAppStepResultCard = ({
   sessionId?: string;
 }) => {
   const detailsRef = useRef<HTMLDetailsElement | null>(null);
+  const bodyRef = useRef<HTMLElement | null>(null);
   const structuredData = Boolean(message.fullText && looksLikeStructuredData(message.fullText));
   const formattedStructuredData = structuredData && message.fullText ? formatStructuredData(message.fullText) : message.fullText || "";
   const bodyText = structuredData ? formattedStructuredData : (message.fullText || message.summary);
@@ -362,11 +363,50 @@ const MiniAppStepResultCard = ({
     window.dispatchEvent(previewEvent);
   };
 
+  const findScrollParent = (element: HTMLElement | null): HTMLElement | null => {
+    let parent = element?.parentElement ?? null;
+    while (parent) {
+      const style = window.getComputedStyle(parent);
+      if ((style.overflowY === "auto" || style.overflowY === "scroll") && parent.scrollHeight > parent.clientHeight) {
+        return parent;
+      }
+      parent = parent.parentElement;
+    }
+    return null;
+  };
+
   const handleToggle = () => {
     if (!detailsRef.current?.open) return;
     requestAnimationFrame(() => {
       requestAnimationFrame(() => {
-        detailsRef.current?.scrollIntoView({ behavior: "smooth", block: "nearest" });
+        const detailsEl = detailsRef.current;
+        if (!detailsEl) return;
+        if (bodyRef.current) {
+          bodyRef.current.scrollTop = bodyRef.current.scrollHeight;
+        }
+        const scrollParent = document.getElementById("messages-container") || findScrollParent(detailsEl);
+        if (scrollParent) {
+          const detailsRect = detailsEl.getBoundingClientRect();
+          const parentRect = scrollParent.getBoundingClientRect();
+          const promptShell = document.querySelector<HTMLElement>("[data-prompt-input-shell]");
+          const promptTop = promptShell?.getBoundingClientRect().top ?? window.innerHeight;
+          const visibleTop = parentRect.top + 12;
+          const visibleBottom = Math.min(parentRect.bottom, promptTop) - 16;
+          const visibleHeight = Math.max(120, visibleBottom - visibleTop);
+          let delta = 0;
+
+          if (detailsRect.height > visibleHeight || detailsRect.top < visibleTop) {
+            delta = detailsRect.top - visibleTop;
+          } else if (detailsRect.bottom > visibleBottom) {
+            delta = detailsRect.bottom - visibleBottom;
+          }
+
+          if (delta !== 0) {
+            scrollParent.scrollTo({ top: Math.max(0, scrollParent.scrollTop + delta), behavior: "smooth" });
+          }
+          return;
+        }
+        detailsEl.scrollIntoView({ behavior: "smooth", block: "start" });
       });
     });
   };
@@ -414,11 +454,17 @@ const MiniAppStepResultCard = ({
           )}
           {bodyText && (
             structuredData ? (
-              <pre className="mt-3 overflow-x-auto whitespace-pre-wrap break-words rounded-lg bg-ink-950 px-3 py-2 text-xs text-ink-50">
+              <pre
+                ref={(node) => { bodyRef.current = node; }}
+                className="mt-3 max-h-[45vh] overflow-auto whitespace-pre-wrap break-words rounded-lg bg-ink-950 px-3 py-2 text-xs text-ink-50"
+              >
                 <code>{bodyText}</code>
               </pre>
             ) : (
-              <div className="mt-3 rounded-lg bg-white/70 px-3 py-2 text-xs text-ink-700 whitespace-pre-wrap break-words max-h-[320px] overflow-auto">
+              <div
+                ref={(node) => { bodyRef.current = node; }}
+                className="mt-3 rounded-lg bg-white/70 px-3 py-2 text-xs text-ink-700 whitespace-pre-wrap break-words max-h-[45vh] overflow-auto"
+              >
                 {bodyText}
               </div>
             )

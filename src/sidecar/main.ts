@@ -1473,6 +1473,12 @@ interface FullReplayResult {
   inputs?: Record<string, unknown>;
 }
 
+function isSessionStoppedError(error: unknown): boolean {
+  return error instanceof Error
+    ? error.message === "__SESSION_STOPPED__"
+    : String(error) === "__SESSION_STOPPED__";
+}
+
 async function runFullReplay(
   workflow: any,
   workspaceDir: string,
@@ -1589,6 +1595,7 @@ async function runFullReplay(
     return new Promise((resolve, reject) => {
       let collectedText = "";
       let stepCompleted = false;
+      let stepError: string | null = null;
       const abortStep = () => {
         if (stepCompleted) return;
         stepCompleted = true;
@@ -1608,8 +1615,13 @@ async function runFullReplay(
 
         if (serverEvent.type === "stream.message" && serverEvent.payload.sessionId === session.id) {
           const msg = serverEvent.payload.message as any;
-          if (msg.type === "result" && msg.result) {
-            collectedText = msg.result;
+          if (msg.type === "result") {
+            if (typeof msg.result === "string") {
+              collectedText = msg.result;
+            }
+            if (msg.subtype === "error" || msg.is_error) {
+              stepError = String(msg.result || msg.error || msg.message || `Step "${stepTitle}" failed`);
+            }
           } else if (msg.type === "assistant" && msg.message?.content) {
             const parts = Array.isArray(msg.message.content) ? msg.message.content : [msg.message.content];
             for (const p of parts) {
@@ -1627,11 +1639,18 @@ async function runFullReplay(
           }
         }
         if (serverEvent.type === "session.status" && serverEvent.payload.sessionId === session.id) {
+          const statusError = serverEvent.payload.error ? String(serverEvent.payload.error) : null;
           if (serverEvent.payload.status === "completed" || serverEvent.payload.status === "idle") {
             if (!stepCompleted) {
               stepCompleted = true;
               cleanupAbortListener();
-              resolve(collectedText.trim());
+              if (stepError) {
+                reject(new Error(stepError));
+              } else if (statusError) {
+                reject(new Error(statusError));
+              } else {
+                resolve(collectedText.trim());
+              }
             }
           }
           if (serverEvent.payload.status === "error") {
@@ -1691,6 +1710,19 @@ async function runFullReplay(
     } catch (stepErr) {
       allStepResults[step.id] = `[LLM ERROR: ${String(stepErr)}]`;
       stepDisplayResults[step.id] = allStepResults[step.id];
+      if (options?.signal) {
+        options.signal.removeEventListener("abort", abortReplay);
+      }
+      sessions.setAbortController(session.id, undefined);
+      runnerHandles.delete(session.id);
+      sessions.updateSession(session.id, { status: "error" });
+      if (!silent) {
+        emit({
+          type: "session.status",
+          payload: { sessionId: session.id, status: "error", error: String(stepErr) }
+        } as any);
+      }
+      throw stepErr;
     }
   }
 
@@ -2689,6 +2721,7 @@ async function handleClientEvent(event: ClientEvent) {
           let collectedText = "";
           let stepCompleted = false;
           let stepUsage = { input_tokens: 0, output_tokens: 0 };
+          let stepError: string | null = null;
 
           const stepEmit = (serverEvent: ServerEvent) => {
             const msgType = serverEvent.type === "stream.message" ? (serverEvent.payload.message as any)?.type : null;
@@ -2703,8 +2736,13 @@ async function handleClientEvent(event: ClientEvent) {
             }
             if (serverEvent.type === "stream.message" && serverEvent.payload.sessionId === session.id) {
               const msg = serverEvent.payload.message as any;
-              if (msg.type === "result" && msg.result) {
-                collectedText = msg.result;
+              if (msg.type === "result") {
+                if (typeof msg.result === "string") {
+                  collectedText = msg.result;
+                }
+                if (msg.subtype === "error" || msg.is_error) {
+                  stepError = String(msg.result || msg.error || msg.message || `Step "${stepTitle}" failed`);
+                }
                 if (msg.usage) {
                   stepUsage = {
                     input_tokens: msg.usage.input_tokens ?? 0,
@@ -2730,11 +2768,16 @@ async function handleClientEvent(event: ClientEvent) {
               }
             }
             if (serverEvent.type === "session.status" && serverEvent.payload.sessionId === session.id) {
+              const statusError = serverEvent.payload.error ? String(serverEvent.payload.error) : null;
               if (serverEvent.payload.status === "completed" || serverEvent.payload.status === "idle") {
                 if (!stepCompleted) {
                   stepCompleted = true;
                   if (stoppedSessionIds.has(session.id)) {
                     reject(new Error("__SESSION_STOPPED__"));
+                  } else if (stepError) {
+                    reject(new Error(stepError));
+                  } else if (statusError) {
+                    reject(new Error(statusError));
                   } else {
                     resolve({ text: collectedText.trim(), usage: stepUsage });
                   }
@@ -2816,7 +2859,7 @@ async function handleClientEvent(event: ClientEvent) {
                 }
               } as any);
             } catch (stepErr) {
-              if (String(stepErr) === "__SESSION_STOPPED__") {
+              if (isSessionStoppedError(stepErr)) {
                 throw stepErr;
               }
               allStepResults[step.id] = `[LLM ERROR: ${String(stepErr)}]`;
@@ -2843,7 +2886,21 @@ async function handleClientEvent(event: ClientEvent) {
                   } as any
                 }
               } as any);
-              finalizeReplayLog("partial");
+              finalizeReplayLog("failed");
+              sessions.setAbortController(session.id, undefined);
+              runnerHandles.delete(session.id);
+              sessions.updateSession(session.id, { status: "error" });
+              emit({
+                type: "session.status",
+                payload: {
+                  sessionId: session.id,
+                  status: "error",
+                  title: session.title,
+                  cwd: session.cwd,
+                  model: session.model,
+                  error: String(stepErr)
+                }
+              } as any);
               return;
             }
           }
@@ -2914,10 +2971,21 @@ async function handleClientEvent(event: ClientEvent) {
           sessions.updateSession(session.id, { status: "completed" });
           emit({ type: "session.status", payload: { sessionId: session.id, status: "completed" } } as any);
         } catch (err) {
-          if (String(err) === "__SESSION_STOPPED__") {
+          if (isSessionStoppedError(err)) {
             finalizeReplayLog("aborted");
             sessions.setAbortController(session.id, undefined);
             runnerHandles.delete(session.id);
+            sessions.updateSession(session.id, { status: "idle" });
+            emit({
+              type: "session.status",
+              payload: {
+                sessionId: session.id,
+                status: "idle",
+                title: session.title,
+                cwd: session.cwd,
+                model: session.model
+              }
+            } as any);
             return;
           }
           finalizeReplayLog("failed");

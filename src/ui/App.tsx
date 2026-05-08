@@ -624,7 +624,11 @@ function App() {
       setForcedRunningSessionId(sessionId);
       useAppStore.getState().setActiveSessionId(sessionId);
     }
-    if (event.type === "session.status" && event.payload.sessionId === forcedRunningSessionId && event.payload.status !== "running") {
+    if (
+      event.type === "session.status"
+      && event.payload.sessionId === forcedRunningSessionId
+      && (event.payload.status === "completed" || event.payload.status === "error" || event.payload.status === "idle")
+    ) {
       setForcedRunningSessionId(null);
     }
 
