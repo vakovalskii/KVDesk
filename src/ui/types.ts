@@ -24,7 +24,7 @@ export type MiniAppStepResultMessage = {
   stepIndex?: number;
   totalSteps?: number;
   title: string;
-  status: "success" | "failed";
+  status: "running" | "success" | "failed";
   summary: string;
   fullText?: string;
   artifactPaths?: string[];

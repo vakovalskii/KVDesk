@@ -2626,7 +2626,8 @@ async function handleClientEvent(event: ClientEvent) {
         } as any);
         emitProgress(`⏳ Выполняю предварительные скрипты (${scriptSteps.length})...`);
 
-        for (const step of scriptSteps) {
+        for (let scriptIndex = 0; scriptIndex < scriptSteps.length; scriptIndex++) {
+          const step = scriptSteps[scriptIndex];
           if (stoppedSessionIds.has(session.id) || replayAbortController.signal.aborted) {
             throw new Error("__SESSION_STOPPED__");
           }
@@ -2644,7 +2645,20 @@ async function handleClientEvent(event: ClientEvent) {
 
             const scriptFile = join(workflowDir, `${step.id}.py`);
             await fs.writeFile(scriptFile, step.script.code, "utf8");
-            emitProgress(`▸ ${step.title}...`);
+            emitAndPersist({
+              type: "stream.message",
+              payload: {
+                sessionId: session.id,
+                message: {
+                  type: "miniapp_step_progress",
+                  stepId: step.id,
+                  stepIndex: scriptIndex + 1,
+                  totalSteps: scriptSteps.length,
+                  title: step.title,
+                  text: `Executing step ${scriptIndex + 1}/${scriptSteps.length}: ${step.title}`
+                } as any
+              }
+            } as any);
 
             const { stdout } = await execFileAsync("python", [scriptFile], {
               cwd: workflowDir, env, timeout: 120_000, maxBuffer: 10 * 1024 * 1024, signal: replayAbortController.signal
@@ -2660,6 +2674,8 @@ async function handleClientEvent(event: ClientEvent) {
                 message: {
                   type: "miniapp_step_result",
                   stepId: step.id,
+                  stepIndex: scriptIndex + 1,
+                  totalSteps: scriptSteps.length,
                   title: step.title,
                   status: "success",
                   summary: persisted.compactResult,
@@ -2681,6 +2697,8 @@ async function handleClientEvent(event: ClientEvent) {
                 message: {
                   type: "miniapp_step_result",
                   stepId: step.id,
+                  stepIndex: scriptIndex + 1,
+                  totalSteps: scriptSteps.length,
                   title: step.title,
                   status: "failed",
                   summary: `Script step failed: ${String(err.message || err)}`,
@@ -2912,9 +2930,21 @@ async function handleClientEvent(event: ClientEvent) {
             if (stoppedSessionIds.has(session.id)) {
               throw new Error("__SESSION_STOPPED__");
             }
-            emitStepProgress(`🔍 Верификация результата...`);
+            const verificationStepId = "__miniapp_verification__";
+            emitAndPersist({
+              type: "stream.message",
+              payload: {
+                sessionId: session.id,
+                message: {
+                  type: "miniapp_step_progress",
+                  stepId: verificationStepId,
+                  title: "Verification",
+                  text: "Verifying miniapp result against the saved acceptance criteria..."
+                } as any
+              }
+            } as any);
             try {
-              const verifyModel = replayWorkflow.source_model || replayModel;
+              const verifyModel = replayModel || replayWorkflow.source_model;
               let replayFiles: string[] = [];
               try {
                 const entries = await fs.readdir(workflowDir, { recursive: true }) as string[];
@@ -2955,6 +2985,21 @@ async function handleClientEvent(event: ClientEvent) {
                 payload: {
                   sessionId: session.id,
                   message: {
+                    type: "miniapp_step_result",
+                    stepId: verificationStepId,
+                    title: "Verification",
+                    status: verification.match ? "success" : "failed",
+                    summary: verificationLines.join("\n"),
+                    fullText: verificationLines.join("\n")
+                  } as any
+                }
+              } as any);
+
+              emitAndPersist({
+                type: "stream.message",
+                payload: {
+                  sessionId: session.id,
+                  message: {
                     type: "system",
                     subtype: "notice",
                     text: verificationLines.join("\n")
@@ -2962,7 +3007,21 @@ async function handleClientEvent(event: ClientEvent) {
                 }
               } as any);
             } catch (verifyErr) {
-              emitStepProgress(`⚠️ Верификация не выполнена: ${String(verifyErr)}`);
+              const errorText = `⚠️ Верификация не выполнена: ${String(verifyErr)}`;
+              emitAndPersist({
+                type: "stream.message",
+                payload: {
+                  sessionId: session.id,
+                  message: {
+                    type: "miniapp_step_result",
+                    stepId: verificationStepId,
+                    title: "Verification",
+                    status: "failed",
+                    summary: errorText,
+                    fullText: errorText
+                  } as any
+                }
+              } as any);
             }
           }
 

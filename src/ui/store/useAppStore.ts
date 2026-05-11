@@ -482,6 +482,57 @@ export const useAppStore = create<AppState>((set, get) => ({
             }
           }
 
+          if (msgAny.type === "miniapp_step_progress" && msgAny.stepId) {
+            const runningMessage = {
+              type: "miniapp_step_result",
+              stepId: msgAny.stepId,
+              stepIndex: msgAny.stepIndex,
+              totalSteps: msgAny.totalSteps,
+              title: msgAny.title,
+              status: "running",
+              summary: msgAny.text || `Running ${msgAny.title}...`
+            } as any;
+            const existingIndex = existing.messages.findIndex((msg: any) =>
+              (msg.type === "miniapp_step_result" || msg.type === "miniapp_step_progress")
+              && msg.stepId === msgAny.stepId
+            );
+            const messages = existingIndex >= 0
+              ? existing.messages.map((msg, index) => index === existingIndex ? runningMessage : msg)
+              : [...existing.messages, runningMessage];
+
+            return {
+              sessions: {
+                ...state.sessions,
+                [sessionId]: {
+                  ...existing,
+                  messages,
+                  inputTokens,
+                  outputTokens
+                }
+              }
+            };
+          }
+
+          if (msgAny.type === "miniapp_step_result" && msgAny.stepId) {
+            const existingIndex = existing.messages.findIndex((msg: any) =>
+              (msg.type === "miniapp_step_result" || msg.type === "miniapp_step_progress")
+              && msg.stepId === msgAny.stepId
+            );
+            if (existingIndex >= 0) {
+              return {
+                sessions: {
+                  ...state.sessions,
+                  [sessionId]: {
+                    ...existing,
+                    messages: existing.messages.map((msg, index) => index === existingIndex ? message : msg),
+                    inputTokens,
+                    outputTokens
+                  }
+                }
+              };
+            }
+          }
+
           return {
             sessions: {
               ...state.sessions,

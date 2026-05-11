@@ -23,6 +23,7 @@ const toolStatusMap = new Map<string, ToolStatus>();
 const toolStatusListeners = new Set<() => void>();
 const MAX_VISIBLE_LINES = 3;
 type MiniAppStepResultMessage = Extract<StreamMessage, { type: "miniapp_step_result" }>;
+type MiniAppStepProgressMessage = Extract<StreamMessage, { type: "miniapp_step_progress" }>;
 
 function extractReferencedPaths(text: string): string[] {
   return Array.from(new Set(
@@ -347,7 +348,15 @@ const MiniAppStepResultCard = ({
   const bodyText = structuredData ? formattedStructuredData : (message.fullText || message.summary);
   const label = message.stepIndex && message.totalSteps
     ? `Step ${message.stepIndex}/${message.totalSteps}`
+    : message.stepId === "__miniapp_verification__"
+      ? "Verification"
     : "Step result";
+  const statusVariant = message.status === "failed" ? "error" : message.status === "running" ? "accent" : "success";
+  const statusClass = message.status === "failed"
+    ? "bg-error/10 text-error"
+    : message.status === "running"
+      ? "bg-accent/10 text-accent"
+      : "bg-success/10 text-success";
   const sessions = useAppStore((state) => state.sessions);
   const cwd = sessionId ? sessions[sessionId]?.cwd : undefined;
   const inlinePaths = extractReferencedPaths(bodyText);
@@ -414,18 +423,18 @@ const MiniAppStepResultCard = ({
   return (
     <div className="flex flex-col gap-2 mt-4 overflow-hidden">
       <div className="header text-accent flex items-center gap-2">
-        <StatusDot variant={message.status === "failed" ? "error" : "success"} isActive={showIndicator} isVisible={true} />
+        <StatusDot variant={statusVariant} isActive={message.status === "running" || showIndicator} isVisible={true} />
         {label}
       </div>
       <details
         ref={detailsRef}
         className="group overflow-hidden rounded-xl border border-ink-900/10 bg-surface-secondary"
-        open={message.status === "failed" || defaultOpen}
+        open={message.status === "running" || message.status === "failed" || defaultOpen}
         onToggle={handleToggle}
       >
         <summary className="flex cursor-pointer list-none items-center gap-2 px-4 py-2 text-left text-sm text-ink-700 transition-colors hover:bg-ink-900/5">
           <span className="flex-1 truncate">{message.title}</span>
-          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${message.status === "failed" ? "bg-error/10 text-error" : "bg-success/10 text-success"}`}>
+          <span className={`shrink-0 rounded-full px-2 py-0.5 text-[11px] font-medium ${statusClass}`}>
             {message.status}
           </span>
           <svg className="h-3.5 w-3.5 flex-shrink-0 text-ink-400 transition-transform group-open:rotate-180" fill="none" stroke="currentColor" viewBox="0 0 24 24">
@@ -474,6 +483,18 @@ const MiniAppStepResultCard = ({
     </div>
   );
 };
+
+const MiniAppProgressCard = ({ message }: { message: MiniAppStepProgressMessage }) => (
+  <div className="flex flex-col gap-2 mt-4 overflow-hidden">
+    <div className="header text-accent flex items-center gap-2">
+      <StatusDot variant="accent" isActive={true} isVisible={true} />
+      {message.title || "MiniApp progress"}
+    </div>
+    <div className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-3 text-sm text-ink-700">
+      {message.text}
+    </div>
+  </div>
+);
 
 const ToolUseCard = ({ 
   messageContent, 
@@ -958,7 +979,7 @@ export function MessageCard({
   const showIndicator = isLast && isRunning;
 
   if (message.type === "miniapp_step_progress") {
-    return null;
+    return <MiniAppProgressCard message={message} />;
   }
 
   if (message.type === "miniapp_step_result") {
