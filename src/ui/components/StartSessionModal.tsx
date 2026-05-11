@@ -157,7 +157,7 @@ export function StartSessionModal({
                 </svg>
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
-                <DropdownMenu.Content className="z-50 min-w-[300px] max-w-[400px] rounded-xl border border-ink-900/10 bg-white shadow-lg" sideOffset={8}>
+                <DropdownMenu.Content className="z-[110] min-w-[300px] max-w-[400px] rounded-xl border border-ink-900/10 bg-white shadow-lg" sideOffset={8}>
                   {/* Search input */}
                   <div className="p-2 border-b border-ink-900/10">
                     <input
