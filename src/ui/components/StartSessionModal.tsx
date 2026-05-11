@@ -133,7 +133,7 @@ export function StartSessionModal({
   })();
 
   return (
-    <div className="fixed inset-0 z-50 flex items-center justify-center bg-ink-900/20 px-4 py-8 backdrop-blur-sm">
+    <div className="fixed inset-0 z-[90] flex items-center justify-center bg-ink-900/20 px-4 py-8 backdrop-blur-sm">
       <div className="w-full max-w-lg max-h-[85vh] overflow-y-auto rounded-2xl border border-ink-900/5 bg-surface p-6 shadow-elevated">
         <div className="flex items-center justify-between">
           <div className="text-base font-semibold text-ink-800">{t("startSessionModal.title")}</div>
@@ -157,7 +157,7 @@ export function StartSessionModal({
                 </svg>
               </DropdownMenu.Trigger>
               <DropdownMenu.Portal>
-                <DropdownMenu.Content className="z-50 min-w-[300px] max-w-[400px] rounded-xl border border-ink-900/10 bg-white shadow-lg" sideOffset={8}>
+                <DropdownMenu.Content className="z-[110] min-w-[300px] max-w-[400px] rounded-xl border border-ink-900/10 bg-white shadow-lg" sideOffset={8}>
                   {/* Search input */}
                   <div className="p-2 border-b border-ink-900/10">
                     <input

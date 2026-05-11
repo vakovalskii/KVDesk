@@ -446,7 +446,7 @@ export const useAppStore = create<AppState>((set, get) => ({
             // Accumulate token usage from result messages (additive — runner sends per-run totals)
             let inputTokens = existing.inputTokens ?? 0;
             let outputTokens = existing.outputTokens ?? 0;
-            if (message.type === "result" && (message as any).usage) {
+            if ((message.type === "result" || message.type === "miniapp_step_result") && (message as any).usage) {
               const { input_tokens, output_tokens } = (message as any).usage;
               if (input_tokens !== undefined) {
                 inputTokens += input_tokens;
@@ -472,13 +472,87 @@ export const useAppStore = create<AppState>((set, get) => ({
           // Accumulate token usage from result messages (additive — runner sends per-run totals)
           let inputTokens = existing.inputTokens ?? 0;
           let outputTokens = existing.outputTokens ?? 0;
-          if (message.type === "result" && message.usage) {
+          if ((message.type === "result" || message.type === "miniapp_step_result") && message.usage) {
             const { input_tokens, output_tokens } = message.usage;
             if (input_tokens !== undefined) {
               inputTokens += input_tokens;
             }
             if (output_tokens !== undefined) {
               outputTokens += output_tokens;
+            }
+          }
+
+          if (msgAny.type === "miniapp_step_progress" && msgAny.stepId) {
+            const runningMessage = {
+              type: "miniapp_step_result",
+              stepId: msgAny.stepId,
+              stepIndex: msgAny.stepIndex,
+              totalSteps: msgAny.totalSteps,
+              title: msgAny.title,
+              status: "running",
+              summary: msgAny.text || `Running ${msgAny.title}...`
+            } as any;
+            let replaced = false;
+            const messages = existing.messages.flatMap((msg: any) => {
+              const isSameStep = (msg.type === "miniapp_step_result" || msg.type === "miniapp_step_progress")
+                && msg.stepId === msgAny.stepId;
+              if (!isSameStep) return [msg];
+              if (replaced) return [];
+              replaced = true;
+              return [runningMessage];
+            });
+            if (!replaced) {
+              messages.push(runningMessage);
+            }
+
+            return {
+              sessions: {
+                ...state.sessions,
+                [sessionId]: {
+                  ...existing,
+                  messages,
+                  inputTokens,
+                  outputTokens
+                }
+              }
+            };
+          }
+
+          if (msgAny.type === "miniapp_step_progress") {
+            return {
+              sessions: {
+                ...state.sessions,
+                [sessionId]: {
+                  ...existing,
+                  inputTokens,
+                  outputTokens
+                }
+              }
+            };
+          }
+
+          if (msgAny.type === "miniapp_step_result" && msgAny.stepId) {
+            let replaced = false;
+            const messages = existing.messages.flatMap((msg: any) => {
+              const isSameStep = (msg.type === "miniapp_step_result" || msg.type === "miniapp_step_progress")
+                && msg.stepId === msgAny.stepId;
+              if (!isSameStep) return [msg];
+              if (replaced) return [];
+              replaced = true;
+              return [message];
+            });
+            if (replaced) {
+              return {
+                sessions: {
+                  ...state.sessions,
+                  [sessionId]: {
+                    ...existing,
+                    messages,
+                    inputTokens,
+                    outputTokens
+                  }
+                }
+              };
             }
           }
 

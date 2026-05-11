@@ -1,3 +1,6 @@
+# Temp
+temp/
+
 # Logs
 logs
 *.log
@@ -6,6 +9,7 @@ yarn-debug.log*
 yarn-error.log*
 pnpm-debug.log*
 lerna-debug.log*
+tmp/
 
 node_modules
 
@@ -69,6 +73,10 @@ sessions.db-shm
 
 # LocalDesk workspace data
 .localdesk/
+
+# Local IDE skills and generated test reports
+.cursor/skills/
+playwright-report/
 
 # Locales directory
 public/locales/
