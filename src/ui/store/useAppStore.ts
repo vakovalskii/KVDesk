@@ -492,13 +492,18 @@ export const useAppStore = create<AppState>((set, get) => ({
               status: "running",
               summary: msgAny.text || `Running ${msgAny.title}...`
             } as any;
-            const existingIndex = existing.messages.findIndex((msg: any) =>
-              (msg.type === "miniapp_step_result" || msg.type === "miniapp_step_progress")
-              && msg.stepId === msgAny.stepId
-            );
-            const messages = existingIndex >= 0
-              ? existing.messages.map((msg, index) => index === existingIndex ? runningMessage : msg)
-              : [...existing.messages, runningMessage];
+            let replaced = false;
+            const messages = existing.messages.flatMap((msg: any) => {
+              const isSameStep = (msg.type === "miniapp_step_result" || msg.type === "miniapp_step_progress")
+                && msg.stepId === msgAny.stepId;
+              if (!isSameStep) return [msg];
+              if (replaced) return [];
+              replaced = true;
+              return [runningMessage];
+            });
+            if (!replaced) {
+              messages.push(runningMessage);
+            }
 
             return {
               sessions: {
@@ -513,18 +518,36 @@ export const useAppStore = create<AppState>((set, get) => ({
             };
           }
 
+          if (msgAny.type === "miniapp_step_progress") {
+            return {
+              sessions: {
+                ...state.sessions,
+                [sessionId]: {
+                  ...existing,
+                  inputTokens,
+                  outputTokens
+                }
+              }
+            };
+          }
+
           if (msgAny.type === "miniapp_step_result" && msgAny.stepId) {
-            const existingIndex = existing.messages.findIndex((msg: any) =>
-              (msg.type === "miniapp_step_result" || msg.type === "miniapp_step_progress")
-              && msg.stepId === msgAny.stepId
-            );
-            if (existingIndex >= 0) {
+            let replaced = false;
+            const messages = existing.messages.flatMap((msg: any) => {
+              const isSameStep = (msg.type === "miniapp_step_result" || msg.type === "miniapp_step_progress")
+                && msg.stepId === msgAny.stepId;
+              if (!isSameStep) return [msg];
+              if (replaced) return [];
+              replaced = true;
+              return [message];
+            });
+            if (replaced) {
               return {
                 sessions: {
                   ...state.sessions,
                   [sessionId]: {
                     ...existing,
-                    messages: existing.messages.map((msg, index) => index === existingIndex ? message : msg),
+                    messages,
                     inputTokens,
                     outputTokens
                   }

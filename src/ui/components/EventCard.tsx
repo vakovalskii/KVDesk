@@ -23,7 +23,6 @@ const toolStatusMap = new Map<string, ToolStatus>();
 const toolStatusListeners = new Set<() => void>();
 const MAX_VISIBLE_LINES = 3;
 type MiniAppStepResultMessage = Extract<StreamMessage, { type: "miniapp_step_result" }>;
-type MiniAppStepProgressMessage = Extract<StreamMessage, { type: "miniapp_step_progress" }>;
 
 function extractReferencedPaths(text: string): string[] {
   return Array.from(new Set(
@@ -483,18 +482,6 @@ const MiniAppStepResultCard = ({
     </div>
   );
 };
-
-const MiniAppProgressCard = ({ message }: { message: MiniAppStepProgressMessage }) => (
-  <div className="flex flex-col gap-2 mt-4 overflow-hidden">
-    <div className="header text-accent flex items-center gap-2">
-      <StatusDot variant="accent" isActive={true} isVisible={true} />
-      {message.title || "MiniApp progress"}
-    </div>
-    <div className="rounded-xl border border-ink-900/10 bg-surface-secondary px-4 py-3 text-sm text-ink-700">
-      {message.text}
-    </div>
-  </div>
-);
 
 const ToolUseCard = ({ 
   messageContent, 
@@ -979,7 +966,7 @@ export function MessageCard({
   const showIndicator = isLast && isRunning;
 
   if (message.type === "miniapp_step_progress") {
-    return <MiniAppProgressCard message={message} />;
+    return null;
   }
 
   if (message.type === "miniapp_step_result") {
