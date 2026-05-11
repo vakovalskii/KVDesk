@@ -74,9 +74,10 @@ sessions.db-shm
 # LocalDesk workspace data
 .localdesk/
 
+# Local IDE skills and generated test reports
+.cursor/skills/
+playwright-report/
+
 # Locales directory
 public/locales/
 public/locales/*
-
-# GitHub workflows (token lacks workflow scope)
-.github/workflows/

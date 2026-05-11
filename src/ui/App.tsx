@@ -1379,7 +1379,7 @@ function App() {
               })}
             </div>
           )}
-          {/* Create Vale App button at bottom */}
+          {/* Save mini-workflow button at bottom */}
           <div className="mt-auto pt-3 border-t border-ink-900/10">
             <button
               className={`w-full rounded-lg px-3 py-2 text-xs font-medium transition-colors ${

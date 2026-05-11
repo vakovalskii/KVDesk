@@ -2569,7 +2569,7 @@ async function handleClientEvent(event: ClientEvent) {
     case "miniworkflow.replay": {
       const { workflowId: replayWfId, cwd: replayCwd, inputs: replayInputs, model: replayModel } = (event as any).payload;
       if (!replayModel || !String(replayModel).trim()) {
-        emit({ type: "miniworkflow.error", payload: { message: "Model is required to run Vale App" } } as any);
+        emit({ type: "miniworkflow.error", payload: { message: "Model is required to run mini-workflow" } } as any);
         return;
       }
       const replayWorkflow = await miniWorkflowStore.load(replayWfId, { projectCwd: replayCwd, preferProject: true });
