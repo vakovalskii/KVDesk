@@ -2727,10 +2727,10 @@ async function handleClientEvent(event: ClientEvent) {
             const msgType = serverEvent.type === "stream.message" ? (serverEvent.payload.message as any)?.type : null;
             const msgSubtype = serverEvent.type === "stream.message" ? (serverEvent.payload.message as any)?.subtype : null;
             const isInternalReplayStatus = serverEvent.type === "session.status" && serverEvent.payload.sessionId === session.id;
-            const shouldForward =
-              (!isInternalReplayStatus && serverEvent.type !== "stream.message")
-              || ((msgType !== "assistant" && msgType !== "text" && msgType !== "result" && msgType !== "user")
-                && !(msgType === "system" && msgSubtype === "init"));
+            const shouldForward = serverEvent.type === "stream.message"
+              ? ((msgType !== "assistant" && msgType !== "text" && msgType !== "result" && msgType !== "user")
+                && !(msgType === "system" && msgSubtype === "init"))
+              : !isInternalReplayStatus;
             if (shouldForward) {
               emit(serverEvent);
             }
