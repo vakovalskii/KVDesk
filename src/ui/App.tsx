@@ -183,12 +183,14 @@ function AppHeader({
   );
 }
 
-function AppEmptyState() {
+function AppEmptyState({ modelName }: { modelName?: string }) {
   const { t } = useI18n();
   return (
     <div className="flex flex-col items-center justify-center py-20 text-center">
       <div className="text-lg font-medium text-ink-700">{t("app.noMessagesYet")}</div>
-      <p className="mt-2 text-sm text-muted">{t("app.startConversation")}</p>
+      <p className="mt-2 text-sm text-muted">
+        {modelName ? t("app.startConversationWithModel", { model: modelName }) : t("app.startConversation")}
+      </p>
     </div>
   );
 }
@@ -645,6 +647,15 @@ function App() {
   const messages = activeSession?.messages ?? [];
   const permissionRequests = activeSession?.permissionRequests ?? [];
   const isRunning = activeSession?.status === "running";
+  const activeSessionModelName = (() => {
+    const model = activeSession?.model;
+    if (!model) return undefined;
+    const llmModel = llmModels.find((m) => m.id === model || m.name === model);
+    if (llmModel) return llmModel.name;
+    const legacyModel = availableModels.find((m) => m.id === model || m.name === model);
+    if (legacyModel) return legacyModel.name;
+    return model.includes("::") ? model.split("::").pop() || model : model;
+  })();
   const isMiniAppSession = Boolean(activeSession?.cwd && activeSession.cwd.includes(".valera\\workflows\\"));
   const showSessionPartialMessage = showPartialMessage && partialMessageSessionIdRef.current === activeSessionId && !isMiniAppSession;
   const showRunningEmptyState = messages.length === 0
@@ -1133,7 +1144,7 @@ function App() {
         <div ref={messagesContainerRef} id="messages-container" className={`flex-1 overflow-y-auto overflow-x-hidden px-8 pt-6 min-w-0 ${activeSession?.todos && activeSession.todos.length > 0 ? 'pb-4' : 'pb-40'}`}>
           <div className="mx-auto w-full max-w-4xl min-w-0">
             {messages.length === 0 ? (
-              showRunningEmptyState ? <AppRunningState /> : <AppEmptyState />
+              showRunningEmptyState ? <AppRunningState /> : <AppEmptyState modelName={activeSessionModelName} />
             ) : (
               messages.map((msg, idx) => (
                 <MessageCard
