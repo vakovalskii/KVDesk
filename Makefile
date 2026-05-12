@@ -3,16 +3,17 @@
 VALERA_ROOT := $(CURDIR)
 SIDECAR_ENTRY := $(VALERA_ROOT)/dist-sidecar/sidecar/main.js
 MIN_RUST_VERSION := 1.74.0
+IS_WINDOWS := $(findstring Windows,$(OS))
 
 check-tools:
-ifdef OS
+ifneq ($(IS_WINDOWS),)
 	@powershell -ExecutionPolicy ByPass -File ./scripts/ensure_deps.ps1
 else
 	@./scripts/ensure_deps.sh
 endif
 
 ensure-node-deps: check-tools
-ifdef OS
+ifneq ($(IS_WINDOWS),)
 	@powershell -ExecutionPolicy ByPass -File ./scripts/ensure_node_deps.ps1
 else
 	@test -f package-lock.json || { echo "level=error event=missing_file file=package-lock.json msg=\"package-lock.json is required for npm ci\"" >&2; exit 1; }
@@ -25,7 +26,7 @@ else
 endif
 
 ensure-rust:
-ifdef OS
+ifneq ($(IS_WINDOWS),)
 	@powershell -ExecutionPolicy ByPass -File ./scripts/ensure_rust.ps1 -MinRustVersion "$(MIN_RUST_VERSION)"
 else
 	@echo "Checking Rust version..."
@@ -59,7 +60,7 @@ else
 endif
 
 ensure-tauri-cli: ensure-rust
-ifdef OS
+ifneq ($(IS_WINDOWS),)
 	@powershell -ExecutionPolicy ByPass -File ./scripts/ensure_tauri_cli.ps1
 else
 	@if ! command -v cargo-tauri >/dev/null 2>&1; then \
@@ -81,7 +82,7 @@ ensure-tools:
 dev-sidecar: ensure-tools
 	@npm run copy:locales
 	@npm run transpile:sidecar
-ifdef OS
+ifneq ($(IS_WINDOWS),)
 	@powershell -ExecutionPolicy ByPass -File ./scripts/setup_sidecar_mock.ps1
 else
 	@./scripts/setup_sidecar_mock.sh
@@ -95,7 +96,7 @@ dev-tauri: ensure-tools
 
 dev: dev-sidecar
 	@echo "Starting Vite + Tauri (Node-sidecar)..."
-ifdef OS
+ifneq ($(IS_WINDOWS),)
 	@node scripts/dev-tauri.cjs
 else
 	@npm run dev:react & \
@@ -110,7 +111,7 @@ bundle: ensure-tools
 	@echo "Building UI..."
 	@npm run build
 	@echo "Building sidecar binary..."
-ifdef OS
+ifneq ($(IS_WINDOWS),)
 	@powershell -Command "if (-not (Test-Path src-tauri\bin)) { New-Item -ItemType Directory -Path src-tauri\bin | Out-Null }"
 else
 	@mkdir -p src-tauri/bin

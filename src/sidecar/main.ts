@@ -668,7 +668,7 @@ function handleSessionStart(event: Extract<ClientEvent, { type: "session.start" 
 }
 
 function handleSessionContinue(event: Extract<ClientEvent, { type: "session.continue" }>) {
-  const { sessionId, prompt, sessionData, messages: historyMessages, todos: historyTodos } = event.payload as any;
+  const { sessionId, prompt, cwd: newCwd, sessionData, messages: historyMessages, todos: historyTodos } = event.payload as any;
   let session = sessions.getSession(sessionId);
   
   // If session not in memory, try to restore from sessionData (provided by Rust)
@@ -694,6 +694,14 @@ function handleSessionContinue(event: Extract<ClientEvent, { type: "session.cont
     // Restore todos from DB
     if (historyTodos && Array.isArray(historyTodos)) {
       (sessions as any).todos.set(sessionId, historyTodos);
+    }
+  }
+  
+  // Update cwd if a new one was provided (from UI, overrides stored cwd)
+  if (newCwd) {
+    sessions.updateSession(sessionId, { cwd: newCwd });
+    if (session) {
+      session.cwd = newCwd;
     }
   }
   

@@ -1505,12 +1505,14 @@ export async function runClaude(options: RunnerOptions): Promise<RunnerHandle> {
                 if (isGitRepo(session.cwd)) {
                   relativePath = getRelativePath(filePath, session.cwd);
                 } else {
-                  // For non-git repos, use path relative to cwd
-                  try {
-                    relativePath = relative(session.cwd, filePath) || filePath;
-                  } catch {
-                    relativePath = filePath;
-                  }
+                // For non-git repos, use path relative to cwd
+                try {
+                  // filePath may be relative; resolve it against session.cwd first
+                  const absoluteFilePath = resolve(session.cwd, filePath);
+                  relativePath = relative(session.cwd, absoluteFilePath) || filePath;
+                } catch {
+                  relativePath = filePath;
+                }
                 }
 
                 // Use diffSnapshot from tool result if available (more accurate)
