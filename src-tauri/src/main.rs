@@ -1606,14 +1606,28 @@ fn client_event(app: tauri::AppHandle, state: tauri::State<'_, AppState>, event:
       let payload = event.get("payload").ok_or_else(|| "[session.continue] missing payload".to_string())?;
       let session_id = payload.get("sessionId").and_then(|v| v.as_str())
         .ok_or_else(|| "[session.continue] missing sessionId".to_string())?;
+      let new_cwd = payload.get("cwd").and_then(|v| v.as_str());
       
       eprintln!("[session.continue] Looking up session: {}", session_id);
+      
+      // Update cwd in DB if provided and different from stored
+      if let Some(cwd) = new_cwd {
+        if let Err(e) = state.db.update_session(session_id, &UpdateSessionParams {
+          cwd: Some(cwd.to_string()),
+          ..Default::default()
+        }) {
+          eprintln!("[session.continue] Failed to update cwd in DB: {}", e);
+        } else {
+          eprintln!("[session.continue] Updated cwd to: {}", cwd);
+        }
+      }
       
       // Get session history from DB to provide full context to sidecar
       match state.db.get_session_history(session_id) {
         Ok(Some(history)) => {
+          let final_cwd = new_cwd.or(history.session.cwd.as_deref()).unwrap_or("");
           eprintln!("[session.continue] Found session: title='{}', cwd={:?}, model={:?}, messages={}", 
-            history.session.title, history.session.cwd, history.session.model, history.messages.len());
+            history.session.title, final_cwd, history.session.model, history.messages.len());
           
           // Enrich the event with session data AND message history
           let enriched_event = json!({
@@ -1624,7 +1638,7 @@ fn client_event(app: tauri::AppHandle, state: tauri::State<'_, AppState>, event:
               // Session data for restoration in sidecar
               "sessionData": {
                 "title": history.session.title,
-                "cwd": history.session.cwd,
+                "cwd": final_cwd,
                 "model": history.session.model,
                 "allowedTools": history.session.allowed_tools,
                 "temperature": history.session.temperature

@@ -49,6 +49,11 @@ print(f"Found {len(files)} files")
 
 **IF IMPORT FAILS**: Package not installed. Use bash tool to run: pip install <package>
 
+**ENCODING NOTE**:
+Web content (especially Russian sites) may use Windows-1251 or other non-UTF-8 encodings.
+The sandbox auto-detects encoding — urlopen().read() returns UTF-8 bytes.
+Use: html = urlopen(url).read().decode("utf-8")  ✓ works for all sites
+
 **LIMITATIONS**: 
 - Requires Python 3 on user's system
 - pip packages must be pre-installed (or use bash to install)

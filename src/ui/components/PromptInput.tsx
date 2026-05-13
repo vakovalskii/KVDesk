@@ -94,7 +94,7 @@ export function usePromptActions(sendEvent: (event: ClientEvent) => void, forced
         setGlobalError(t("promptInput.sessionStillRunning"));
         return;
       }
-      sendEvent({ type: "session.continue", payload: { sessionId: activeSessionId, prompt: trimmedPrompt } });
+      sendEvent({ type: "session.continue", payload: { sessionId: activeSessionId, prompt: trimmedPrompt, cwd: cwd.trim() || undefined } });
     }
     setPrompt("");
   }, [activeSession, activeSessionId, cwd, prompt, sendEvent, setGlobalError, setPendingStart, setPrompt, selectedModel, selectedTemperature, sendTemperature]);

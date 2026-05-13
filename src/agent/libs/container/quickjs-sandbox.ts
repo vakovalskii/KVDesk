@@ -151,6 +151,119 @@ export async function executeInQuickJS(
   }
 }
 
+const PYTHON_ENCODING_WRAPPER = `
+import sys; sys.stdout.reconfigure(encoding='utf-8'); sys.stderr.reconfigure(encoding='utf-8')
+import urllib.request
+
+# Monkey-patches urllib and requests to auto-detect encoding (cp1251/utf-8/koi8-r).
+# Safe here because: each execute_python call spawns a fresh subprocess, so patches
+# are isolated to that single execution and never leak to other code.
+
+_orig_urlopen = urllib.request.urlopen
+
+def _detect_and_decode(raw_bytes):
+    if isinstance(raw_bytes, str):
+        return raw_bytes.encode('utf-8')
+    charset = None
+    ct = None
+    for header_name in ('content-type', 'Content-Type'):
+        try:
+            ct = raw_bytes.headers.get(header_name, '')
+        except Exception:
+            pass
+    if ct and 'charset=' in ct:
+        charset = ct.split('charset=')[-1].split(';')[0].strip()
+    if not charset:
+        try:
+            import chardet
+            det = chardet.detect(raw_bytes[:8192] if hasattr(raw_bytes, '__getitem__') else raw_bytes)
+            charset = det.get('encoding') if det and det.get('confidence', 0) > 0.7 else None
+        except Exception:
+            pass  # chardet optional, fall through to encoding guesses
+    for enc in (charset, 'cp1251', 'windows-1251', 'utf-8', 'koi8-r'):
+        if not enc:
+            continue
+        try:
+            return raw_bytes.decode(enc).encode('utf-8')
+        except Exception:
+            pass
+    return raw_bytes.decode('utf-8', errors='replace').encode('utf-8')
+
+class _AutoDecodeResponse:
+    def __init__(self, original_response):
+        self._orig = original_response
+        try:
+            self.content = _detect_and_decode(original_response.read())
+        except Exception as e:
+            sys.stderr.write('[encoding-wrapper] Failed to decode response: ' + str(e) + '\\n')
+            self.content = original_response.read()
+    def read(self, n=-1):
+        if n < 0:
+            return self.content
+        return self.content[:n]
+    def __getattr__(self, name):
+        return getattr(self._orig, name)
+
+def _auto_urlopen(url, *args, **kwargs):
+    response = _orig_urlopen(url, *args, **kwargs)
+    try:
+        return _AutoDecodeResponse(response)
+    except Exception as e:
+        sys.stderr.write('[encoding-wrapper] Failed to wrap urlopen response: ' + str(e) + '\\n')
+        return response
+
+urllib.request.urlopen = _auto_urlopen
+
+try:
+    import requests
+
+    _orig_requests_get = requests.get
+    _orig_requests_session_request = None
+
+    class _AutoDecodeRequestsResponse:
+        def __init__(self, original_response):
+            self._orig = original_response
+            try:
+                raw = original_response.content
+                self._decoded = _detect_and_decode(raw)
+            except Exception as e:
+                sys.stderr.write('[encoding-wrapper] Failed to decode requests response: ' + str(e) + '\\n')
+                self._decoded = original_response.content
+        @property
+        def content(self):
+            return self._decoded
+        @property
+        def text(self):
+            return self._decoded.decode('utf-8', errors='replace')
+        def __getattr__(self, name):
+            return getattr(self._orig, name)
+
+    def _auto_requests_get(url, **kwargs):
+        resp = _orig_requests_get(url, **kwargs)
+        try:
+            return _AutoDecodeRequestsResponse(resp)
+        except Exception as e:
+            sys.stderr.write('[encoding-wrapper] Failed to wrap requests.get: ' + str(e) + '\\n')
+            return resp
+
+    def _auto_requests_session_init(self, *args, **kwargs):
+        _orig_requests_session_init(self, *args, **kwargs)
+        _orig_session_request = self.request
+        def _auto_session_request(method, url, **kw):
+            resp = _orig_session_request(method, url, **kw)
+            try:
+                return _AutoDecodeRequestsResponse(resp)
+            except Exception:
+                return resp
+        self.request = _auto_session_request
+
+    _orig_requests_session_init = requests.Session.__init__
+    requests.Session.__init__ = _auto_requests_session_init
+    requests.get = _auto_requests_get
+except Exception as e:
+    sys.stderr.write('[encoding-wrapper] Failed to patch requests library: ' + str(e) + '\\n')
+`;
+
 /**
  * Execute Python code (requires Python 3 installed)
  */
@@ -168,7 +281,9 @@ export async function executePython(
     // Find Python
     const pythonCmd = process.platform === 'win32' ? 'python' : 'python3';
     
-    const proc = spawn(pythonCmd, ['-c', code], {
+    const wrappedCode = PYTHON_ENCODING_WRAPPER + '\n\n' + code;
+    
+    const proc = spawn(pythonCmd, ['-c', wrappedCode], {
       cwd,
       timeout,
       stdio: ['pipe', 'pipe', 'pipe']
