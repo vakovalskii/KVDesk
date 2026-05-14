@@ -4,7 +4,7 @@ set -euo pipefail
 echo "[voice] Setting up local transcription server..."
 
 PORT="${PORT:-8000}"
-HOST="${HOST:-0.0.0.0}"
+HOST="${HOST:-127.0.0.1}"
 # IMPORTANT: the Docker image's /v1/models does NOT include `Systran/faster-whisper-large-v3-turbo`,
 # which causes the built-in Gradio UI to crash with AssertionError.
 # This model id is present in /v1/models on `latest-cpu` and works well as a default.
@@ -215,5 +215,4 @@ python -m pip install --upgrade "faster-whisper-server @ git+${GIT_URL}"
 echo "[voice] Starting server on http://localhost:${PORT}"
 echo "[voice] Base URL for LocalDesk: http://localhost:${PORT}/v1"
 exec faster-whisper-server --host "$HOST" --port "$PORT" --model "$MODEL" --device "$DEVICE" --compute_type "$COMPUTE_TYPE"
-
 
