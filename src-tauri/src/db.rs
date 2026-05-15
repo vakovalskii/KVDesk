@@ -1,5 +1,6 @@
 use rusqlite::{Connection, params, Result as SqliteResult};
 use serde::{Deserialize, Serialize};
+use serde_json::Value as JsonValue;
 use std::path::Path;
 use std::sync::Mutex;
 
@@ -647,17 +648,60 @@ pub struct ApiSettings {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub model: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub temperature: Option<f64>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub permission_mode: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub web_search_provider: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tavily_api_key: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_tavily_search: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zai_api_key: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zai_api_url: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_memory: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_zai_reader: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub zai_reader_api_url: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub enable_todos: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub locale: Option<String>,
+    // Tool group toggles
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_git_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_browser_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_duck_duck_go: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_fetch_tools: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub enable_image_tools: Option<bool>,
+    // Complex nested settings - keep as raw JSON to preserve shape
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub llm_providers: Option<JsonValue>,
+    // Voice settings
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub voice_settings: Option<VoiceSettings>,
+    // Add other settings as needed
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(rename_all = "camelCase")]
+pub struct VoiceSettings {
+    pub base_url: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub api_key: Option<String>,
+    pub model: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
 }
 
 // ============ Database methods for Providers ============

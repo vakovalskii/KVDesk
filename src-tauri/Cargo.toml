@@ -23,6 +23,8 @@ base64 = "0.22"
 uuid = { version = "1", features = ["v4"] }
 chrono = "0.4"
 regex = "1"
+reqwest = { version = "0.11", features = ["json", "multipart", "rustls-tls", "blocking"] }
+mime = "0.3"
 
 # Code Sandbox - pure Rust interpreters (no external deps needed)
 boa_engine = "0.21"           # JavaScript engine
@@ -30,4 +32,3 @@ boa_engine = "0.21"           # JavaScript engine
 
 [features]
 custom-protocol = ["tauri/custom-protocol"]
-

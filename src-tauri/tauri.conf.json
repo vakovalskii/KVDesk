@@ -35,6 +35,10 @@
       "icons/icon.icns",
       "icons/icon.ico"
     ],
+    "macOS": {
+      "entitlements": "../build/entitlements.mac.plist",
+      "infoPlist": "Info.plist"
+    },
     "externalBin": [
       "bin/valera-sidecar"
     ],

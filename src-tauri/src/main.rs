@@ -5,16 +5,16 @@ mod db;
 mod sandbox;
 mod scheduler;
 
-use db::{Database, CreateSessionParams, UpdateSessionParams, Session, SessionHistory, TodoItem, FileChange, LLMProvider, LLMModel, LLMProviderSettings, ApiSettings, ScheduledTask, CreateScheduledTaskParams, UpdateScheduledTaskParams};
+use db::{Database, CreateSessionParams, UpdateSessionParams, Session, SessionHistory, TodoItem, FileChange, LLMProvider, LLMModel, LLMProviderSettings, ApiSettings, ScheduledTask, CreateScheduledTaskParams, UpdateScheduledTaskParams, VoiceSettings};
 use scheduler::SchedulerService;
-use base64::Engine as _;
+use base64::Engine;
 use serde::Serialize;
 use serde_json::{json, Value};
 use std::fs;
 use std::io::{BufRead, BufReader, Read, Write};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::sync::{Arc, Mutex, OnceLock};
 use std::time::{SystemTime, UNIX_EPOCH};
 use tauri::{Emitter, Manager};
@@ -199,6 +199,27 @@ fn emit_server_event_app(app: &tauri::AppHandle, event: &Value) -> Result<(), St
     eprintln!("{msg}");
     msg
   })
+}
+
+#[derive(Default)]
+struct VoiceBuffer {
+  bytes: Vec<u8>,
+  last_sent_ms: u64,
+  audio_mime: String,
+  last_partial_text: Option<String>,
+  last_partial_ms: u64,
+  last_partial_bytes_len: usize,
+}
+
+#[derive(Default)]
+struct VoiceState {
+  buffers: Mutex<HashMap<String, VoiceBuffer>>,
+  last_status: Mutex<Option<bool>>,
+  // Prevent spamming warmups:
+  // - allow only one warmup at a time (warmup_in_flight)
+  // - skip if the last SUCCESSFUL warmup was for the same (base_url, model)
+  warmup_last_success_key: Mutex<Option<(String, String)>>,
+  warmup_in_flight: Mutex<bool>,
 }
 
 fn memory_path() -> Result<PathBuf, String> {
@@ -484,6 +505,7 @@ struct AppState {
   db: Arc<Database>,
   sidecar: SidecarState,
   scheduler: SchedulerService,
+  voice: VoiceState,
 }
 
 #[derive(Default)]
@@ -1327,6 +1349,492 @@ fn db_scheduled_task_delete(state: tauri::State<'_, AppState>, id: String) -> Re
     .map_err(|e| format!("[db_scheduled_task_delete] {}", e))
 }
 
+fn normalize_base_url(base_url: &str) -> String {
+  base_url.trim().trim_end_matches('/').to_string()
+}
+
+fn build_healthcheck_urls(base_url: &str) -> Vec<String> {
+  let base = normalize_base_url(base_url);
+  if base.is_empty() {
+    return vec![];
+  }
+  // Try health + OpenAI-style /v1/models (works for most compatible servers)
+  // plus a variant without trailing /v1
+  let mut urls = vec![
+    format!("{base}/health"),
+    format!("{base}/v1/health"),
+    format!("{base}/v1/models"),
+  ];
+  if base.ends_with("/v1") {
+    let root = base.trim_end_matches("/v1");
+    urls.push(format!("{root}/health"));
+    urls.push(format!("{root}/v1/models"));
+  }
+  urls.sort();
+  urls.dedup();
+  urls
+}
+
+fn check_voice_server_status_blocking(base_url: &str, api_key: Option<&str>) -> Result<(bool, Option<String>), String> {
+  let urls = build_healthcheck_urls(base_url);
+  if urls.is_empty() {
+    return Ok((false, None));
+  }
+
+  let client = reqwest::blocking::Client::builder()
+    .timeout(std::time::Duration::from_secs(5))
+    .build()
+    .map_err(|e| format!("[voice] failed to build http client: {e}"))?;
+
+  let mut unauthorized = false;
+  for url in urls {
+    let mut req = client.get(&url);
+    if let Some(key) = api_key {
+      if !key.trim().is_empty() {
+        req = req.bearer_auth(key.trim());
+      }
+    }
+    match req.send() {
+      Ok(resp) if resp.status().is_success() => return Ok((true, None)),
+      Ok(resp) if resp.status().as_u16() == 401 || resp.status().as_u16() == 403 => {
+        unauthorized = true;
+        continue;
+      }
+      Ok(_) => continue,
+      Err(_) => continue,
+    };
+  }
+
+  if unauthorized {
+    return Ok((false, Some("Unauthorized (проверь API key)".to_string())));
+  }
+  Ok((false, None))
+}
+
+fn build_transcription_url(base_url: &str) -> Result<String, String> {
+  let base = normalize_base_url(base_url);
+  if base.is_empty() {
+    return Err("[voice] baseUrl is empty".to_string());
+  }
+  if base.ends_with("/v1") {
+    return Ok(format!("{base}/audio/transcriptions"));
+  }
+  if base.contains("/v1/") {
+    return Ok(format!("{base}/audio/transcriptions"));
+  }
+  Ok(format!("{base}/v1/audio/transcriptions"))
+}
+
+fn build_models_url(base_url: &str) -> Result<String, String> {
+  let base = normalize_base_url(base_url);
+  if base.is_empty() {
+    return Err("[voice.models] baseUrl is empty".to_string());
+  }
+  if base.ends_with("/v1") {
+    return Ok(format!("{base}/models"));
+  }
+  if base.contains("/v1/") {
+    return Ok(format!("{base}/models"));
+  }
+  Ok(format!("{base}/v1/models"))
+}
+
+fn extract_models(value: &Value) -> Vec<String> {
+  let list = if let Some(arr) = value.as_array() {
+    arr
+  } else if let Some(arr) = value.get("data").and_then(|v| v.as_array()) {
+    arr
+  } else if let Some(arr) = value.get("models").and_then(|v| v.as_array()) {
+    arr
+  } else {
+    return vec![];
+  };
+
+  let mut seen = HashSet::new();
+  let mut out = Vec::new();
+  for item in list {
+    let id = if let Some(s) = item.as_str() {
+      Some(s.to_string())
+    } else if let Some(obj) = item.as_object() {
+      obj.get("id")
+        .and_then(|v| v.as_str())
+        .map(|s| s.to_string())
+        .or_else(|| obj.get("name").and_then(|v| v.as_str()).map(|s| s.to_string()))
+    } else {
+      None
+    };
+    if let Some(id) = id {
+      let trimmed = id.trim();
+      if !trimmed.is_empty() && !seen.contains(trimmed) {
+        seen.insert(trimmed.to_string());
+        out.push(trimmed.to_string());
+      }
+    }
+  }
+  out
+}
+
+fn guess_extension_from_mime(mime: &str) -> &'static str {
+  let m = mime.to_lowercase();
+  if m.contains("webm") { return "webm"; }
+  if m.contains("ogg") { return "ogg"; }
+  if m.contains("wav") { return "wav"; }
+  if m.contains("mp4") || m.contains("m4a") { return "m4a"; }
+  "bin"
+}
+
+async fn transcribe_audio(
+  base_url: &str,
+  api_key: Option<&str>,
+  model: &str,
+  language: Option<&str>,
+  audio_mime: &str,
+  bytes: Vec<u8>
+) -> Result<String, String> {
+  if bytes.is_empty() {
+    return Err("[voice] audio buffer is empty".to_string());
+  }
+
+  let url = build_transcription_url(base_url)?;
+  let client = reqwest::Client::builder()
+    // First request can block on model download/load (often 1-2+ minutes).
+    .timeout(std::time::Duration::from_secs(240))
+    .build()
+    .map_err(|e| format!("[voice] failed to build http client: {e}"))?;
+
+  let filename = format!("audio.{}", guess_extension_from_mime(audio_mime));
+  let mut part = reqwest::multipart::Part::bytes(bytes).file_name(filename);
+  let mime_raw = audio_mime.trim();
+  if !mime_raw.is_empty() {
+    // `mime_str` consumes Part; avoid losing it by only calling when the mime is parseable.
+    if mime_raw.parse::<mime::Mime>().is_ok() {
+      part = part.mime_str(mime_raw).map_err(|e| format!("[voice] invalid mime '{mime_raw}': {e}"))?;
+    }
+  }
+
+  let mut form = reqwest::multipart::Form::new()
+    .part("file", part)
+    .text("model", model.to_string());
+  if let Some(lang) = language {
+    if !lang.trim().is_empty() {
+      form = form.text("language", lang.trim().to_string());
+    }
+  }
+
+  let mut req = client.post(url).multipart(form);
+  if let Some(key) = api_key {
+    if !key.trim().is_empty() {
+      req = req.bearer_auth(key.trim());
+    }
+  }
+
+  let resp = req.send().await.map_err(|e| {
+    if e.is_timeout() {
+      "[voice] request timed out (model may still be loading; try again in ~1-2 minutes)".to_string()
+    } else {
+      format!("[voice] request failed: {e}")
+    }
+  })?;
+  let status = resp.status();
+  let body = resp.text().await.map_err(|e| format!("[voice] failed to read response: {e}"))?;
+  if !status.is_success() {
+    return Err(format!("[voice] http {status}: {body}"));
+  }
+
+  let parsed: Value = serde_json::from_str(&body).map_err(|e| format!("[voice] invalid json: {e}; body={body}"))?;
+  let text = parsed.get("text").and_then(|v| v.as_str()).unwrap_or("").to_string();
+  Ok(text)
+}
+
+#[tauri::command]
+async fn list_voice_models(base_url: String, api_key: Option<String>) -> Result<Vec<String>, String> {
+  let url = build_models_url(&base_url)?;
+  let client = reqwest::Client::builder()
+    .timeout(std::time::Duration::from_secs(30))
+    .build()
+    .map_err(|e| format!("[voice.models] failed to build http client: {e}"))?;
+
+  let mut req = client.get(url);
+  if let Some(key) = api_key.as_deref() {
+    if !key.trim().is_empty() {
+      req = req.bearer_auth(key.trim());
+    }
+  }
+
+  let resp = req.send().await.map_err(|e| format!("[voice.models] request failed: {e}"))?;
+  let status = resp.status();
+  let body = resp.text().await.map_err(|e| format!("[voice.models] failed to read response: {e}"))?;
+  if !status.is_success() {
+    return Err(format!("[voice.models] http {status}: {body}"));
+  }
+  let parsed: Value = serde_json::from_str(&body)
+    .map_err(|e| format!("[voice.models] invalid json: {e}; body={body}"))?;
+  Ok(extract_models(&parsed))
+}
+
+#[tauri::command]
+async fn transcribe_voice_stream(
+  app: tauri::AppHandle,
+  state: tauri::State<'_, AppState>,
+  audio_chunk_b64: String,
+  audio_mime: String,
+  session_id: String,
+  base_url: String,
+  api_key: Option<String>,
+  model: String,
+  language: Option<String>,
+  is_final: bool
+) -> Result<(), String> {
+  if session_id.trim().is_empty() {
+    return Err("[transcribe_voice_stream] sessionId is empty".to_string());
+  }
+
+  if let Ok(last_guard) = state.voice.last_status.lock() {
+    if matches!(*last_guard, Some(false)) {
+      if let Ok(mut guard) = state.voice.buffers.lock() {
+        guard.remove(&session_id);
+      }
+      emit_server_event_app(&app, &json!({
+        "type": "voice.transcription.error",
+        "payload": {
+          "sessionId": session_id,
+          "message": "[voice] server unavailable"
+        }
+      }))?;
+      return Ok(());
+    }
+  }
+
+  // Append chunk (if provided)
+  if !audio_chunk_b64.trim().is_empty() {
+    let decoded = base64::engine::general_purpose::STANDARD
+      .decode(audio_chunk_b64.trim())
+      .map_err(|e| format!("[transcribe_voice_stream] invalid base64: {e}"))?;
+    let mut guard = state.voice.buffers.lock().map_err(|_| "[voice] buffers lock poisoned".to_string())?;
+    let entry = guard.entry(session_id.clone()).or_default();
+    entry.bytes.extend_from_slice(&decoded);
+    if !audio_mime.trim().is_empty() {
+      entry.audio_mime = audio_mime.trim().to_string();
+    }
+  } else if !audio_mime.trim().is_empty() {
+    // Allow updating mime even if this call is just a finalization marker
+    let mut guard = state.voice.buffers.lock().map_err(|_| "[voice] buffers lock poisoned".to_string())?;
+    let entry = guard.entry(session_id.clone()).or_default();
+    entry.audio_mime = audio_mime.trim().to_string();
+  }
+
+  // Decide whether to send a partial update
+  if !is_final {
+    let now = now_ms().unwrap_or(0);
+    {
+      let mut guard = state.voice.buffers.lock().map_err(|_| "[voice] buffers lock poisoned".to_string())?;
+      let entry = guard.entry(session_id.clone()).or_default();
+      if now.saturating_sub(entry.last_sent_ms) < 1500 {
+        return Ok(());
+      }
+      entry.last_sent_ms = now;
+    }
+  }
+
+  // Snapshot buffer for request (and clear on final)
+  let (bytes, mime, last_partial_text, last_partial_ms, last_partial_bytes_len) = {
+    let mut guard = state.voice.buffers.lock().map_err(|_| "[voice] buffers lock poisoned".to_string())?;
+    let entry = guard.entry(session_id.clone()).or_default();
+    let mime = if entry.audio_mime.trim().is_empty() { audio_mime.clone() } else { entry.audio_mime.clone() };
+    let bytes = entry.bytes.clone();
+    let last_partial_text = entry.last_partial_text.clone();
+    let last_partial_ms = entry.last_partial_ms;
+    let last_partial_bytes_len = entry.last_partial_bytes_len;
+    if is_final {
+      guard.remove(&session_id);
+    }
+    (bytes, mime, last_partial_text, last_partial_ms, last_partial_bytes_len)
+  };
+
+  if is_final {
+    let now = now_ms().unwrap_or(0);
+    if let Some(text) = last_partial_text {
+      if last_partial_bytes_len == bytes.len() && now.saturating_sub(last_partial_ms) <= 2000 {
+        let event_type = "voice.transcription.final";
+        emit_server_event_app(&app, &json!({
+          "type": event_type,
+          "payload": { "sessionId": session_id, "text": text }
+        }))?;
+        return Ok(());
+      }
+    }
+  }
+
+  let app_handle = app.clone();
+  let session_id_clone = session_id.clone();
+  let model_name = if model.trim().is_empty() {
+    "deepdml/faster-whisper-large-v3-turbo-ct2".to_string()
+  } else {
+    model.trim().to_string()
+  };
+  let base_url_clone = base_url.clone();
+  let audio_mime_clone = mime.clone();
+  let api_key_clone = api_key.clone();
+  let language_clone = language.clone();
+  let bytes_len = bytes.len();
+  let is_final_call = is_final;
+
+  tauri::async_runtime::spawn(async move {
+    let result = transcribe_audio(
+      &base_url_clone,
+      api_key_clone.as_deref(),
+      &model_name,
+      language_clone.as_deref(),
+      &audio_mime_clone,
+      bytes
+    ).await;
+
+    match result {
+      Ok(text) => {
+        let event_type = if is_final_call { "voice.transcription.final" } else { "voice.transcription.partial" };
+        if !is_final_call {
+          if let Ok(mut guard) = app_handle.state::<AppState>().voice.buffers.lock() {
+            if let Some(entry) = guard.get_mut(&session_id_clone) {
+              entry.last_partial_text = Some(text.clone());
+              entry.last_partial_ms = now_ms().unwrap_or(0);
+              entry.last_partial_bytes_len = bytes_len;
+            }
+          }
+        }
+        let _ = emit_server_event_app(&app_handle, &json!({
+          "type": event_type,
+          "payload": { "sessionId": session_id_clone, "text": text }
+        }));
+      }
+      Err(message) => {
+        if let Ok(mut guard) = app_handle.state::<AppState>().voice.buffers.lock() {
+          guard.remove(&session_id_clone);
+        }
+        let _ = emit_server_event_app(&app_handle, &json!({
+          "type": "voice.transcription.error",
+          "payload": { "sessionId": session_id_clone, "message": message }
+        }));
+      }
+    }
+  });
+
+  Ok(())
+}
+
+fn build_silence_wav_16k_mono(duration_ms: u32) -> Vec<u8> {
+  // Minimal PCM WAV (16-bit, 16kHz, mono) filled with silence.
+  let sample_rate: u32 = 16_000;
+  let channels: u16 = 1;
+  let bits_per_sample: u16 = 16;
+  let bytes_per_sample: u16 = bits_per_sample / 8;
+  let num_samples: u32 = (sample_rate * duration_ms) / 1000;
+  let data_len: u32 = num_samples * channels as u32 * bytes_per_sample as u32;
+
+  let mut out = Vec::with_capacity(44 + data_len as usize);
+  out.extend_from_slice(b"RIFF");
+  out.extend_from_slice(&(36 + data_len).to_le_bytes());
+  out.extend_from_slice(b"WAVE");
+  out.extend_from_slice(b"fmt ");
+  out.extend_from_slice(&16u32.to_le_bytes()); // PCM header size
+  out.extend_from_slice(&1u16.to_le_bytes()); // PCM format
+  out.extend_from_slice(&channels.to_le_bytes());
+  out.extend_from_slice(&sample_rate.to_le_bytes());
+  let byte_rate = sample_rate * channels as u32 * bytes_per_sample as u32;
+  out.extend_from_slice(&byte_rate.to_le_bytes());
+  let block_align = channels * bytes_per_sample;
+  out.extend_from_slice(&block_align.to_le_bytes());
+  out.extend_from_slice(&bits_per_sample.to_le_bytes());
+  out.extend_from_slice(b"data");
+  out.extend_from_slice(&data_len.to_le_bytes());
+  out.resize(44 + data_len as usize, 0u8);
+  out
+}
+
+fn try_start_warmup(state: &AppState, base_url: &str, model: &str) -> bool {
+  let key = (base_url.trim().to_string(), model.trim().to_string());
+  if key.0.is_empty() || key.1.is_empty() {
+    return false;
+  }
+  let mut in_flight = state.voice.warmup_in_flight.lock().unwrap();
+  if *in_flight {
+    return false;
+  }
+  let last_ok = state.voice.warmup_last_success_key.lock().unwrap();
+  if last_ok.as_ref() == Some(&key) {
+    return false;
+  }
+  *in_flight = true;
+  true
+}
+
+fn finish_warmup(state: &AppState) {
+  if let Ok(mut in_flight) = state.voice.warmup_in_flight.lock() {
+    *in_flight = false;
+  }
+}
+
+fn mark_warmup_success(state: &AppState, base_url: &str, model: &str) {
+  let key = (base_url.trim().to_string(), model.trim().to_string());
+  if key.0.is_empty() || key.1.is_empty() {
+    return;
+  }
+  if let Ok(mut last_ok) = state.voice.warmup_last_success_key.lock() {
+    *last_ok = Some(key);
+  }
+}
+
+fn transcribe_audio_blocking(
+  base_url: &str,
+  api_key: Option<&str>,
+  model: &str,
+  audio_mime: &str,
+  bytes: Vec<u8>
+) -> Result<(), String> {
+  if bytes.is_empty() {
+    return Err("[voice.warmup] audio buffer is empty".to_string());
+  }
+  let url = build_transcription_url(base_url)?;
+  let client = reqwest::blocking::Client::builder()
+    .timeout(std::time::Duration::from_secs(240))
+    .build()
+    .map_err(|e| format!("[voice.warmup] failed to build http client: {e}"))?;
+
+  let filename = format!("audio.{}", guess_extension_from_mime(audio_mime));
+  let mut part = reqwest::blocking::multipart::Part::bytes(bytes).file_name(filename);
+  let mime_raw = audio_mime.trim();
+  if !mime_raw.is_empty() {
+    if mime_raw.parse::<mime::Mime>().is_ok() {
+      part = part.mime_str(mime_raw).map_err(|e| format!("[voice.warmup] invalid mime '{mime_raw}': {e}"))?;
+    }
+  }
+
+  let form = reqwest::blocking::multipart::Form::new()
+    .part("file", part)
+    .text("model", model.to_string());
+
+  let mut req = client.post(url).multipart(form);
+  if let Some(key) = api_key {
+    if !key.trim().is_empty() {
+      req = req.bearer_auth(key.trim());
+    }
+  }
+
+  let resp = req.send().map_err(|e| {
+    if e.is_timeout() {
+      "[voice.warmup] request timed out (server may still be loading model)".to_string()
+    } else {
+      format!("[voice.warmup] request failed: {e}")
+    }
+  })?;
+
+  if !resp.status().is_success() {
+    let status = resp.status();
+    let body = resp.text().unwrap_or_default();
+    return Err(format!("[voice.warmup] http {status}: {body}"));
+  }
+  Ok(())
+}
+
 #[tauri::command]
 fn client_event(app: tauri::AppHandle, state: tauri::State<'_, AppState>, event: Value) -> Result<(), String> {
   let event_type = event
@@ -1341,6 +1849,70 @@ fn client_event(app: tauri::AppHandle, state: tauri::State<'_, AppState>, event:
   }
 
   match event_type {
+    "voice.check" => {
+      let payload = event.get("payload")
+        .ok_or_else(|| "[voice.check] missing payload".to_string())?;
+      let base_url = payload.get("baseUrl")
+        .and_then(|v| v.as_str())
+        .unwrap_or("")
+        .to_string();
+      let api_key = payload.get("apiKey").and_then(|v| v.as_str()).map(|s| s.to_string());
+      let app_handle = app.clone();
+      std::thread::spawn(move || {
+        let (available, error) = check_voice_server_status_blocking(&base_url, api_key.as_deref())
+          .unwrap_or((false, Some("Healthcheck failed".to_string())));
+
+        if let Ok(mut last_guard) = app_handle.state::<AppState>().voice.last_status.lock() {
+          *last_guard = Some(available);
+        }
+
+        let _ = emit_server_event_app(&app_handle, &json!({
+          "type": "voice.server.status",
+          "payload": { "available": available, "error": error }
+        }));
+      });
+      Ok(())
+    }
+
+    "voice.preload" => {
+      let payload = event.get("payload")
+        .ok_or_else(|| "[voice.preload] missing payload".to_string())?;
+      let base_url = payload.get("baseUrl").and_then(|v| v.as_str()).unwrap_or("").to_string();
+      let model = payload.get("model").and_then(|v| v.as_str()).unwrap_or("").to_string();
+      let api_key = payload.get("apiKey").and_then(|v| v.as_str()).map(|s| s.to_string());
+
+      if !try_start_warmup(state.inner(), &base_url, &model) {
+        return Ok(());
+      }
+
+      let app_handle = app.clone();
+      std::thread::spawn(move || {
+        // Run a tiny transcription to force model load on server.
+        let wav = build_silence_wav_16k_mono(800);
+        let res = transcribe_audio_blocking(
+          &base_url,
+          api_key.as_deref(),
+          model.trim(),
+          "audio/wav",
+          wav
+        );
+        match res {
+          Ok(()) => {
+            // Record successful warmup so we can skip duplicate warmups later.
+            let state: tauri::State<'_, AppState> = app_handle.state();
+            mark_warmup_success(state.inner(), &base_url, model.trim());
+          }
+          Err(_) => {}
+        }
+
+        // Mark warmup complete
+        let state: tauri::State<'_, AppState> = app_handle.state();
+        finish_warmup(state.inner());
+      });
+
+      Ok(())
+    }
+
     "open.external" => {
       let payload = event
         .get("payload")
@@ -2308,6 +2880,7 @@ fn main() {
     db: db_arc,
     sidecar: SidecarState::default(),
     scheduler,
+    voice: VoiceState::default(),
   };
 
   tauri::Builder::default()
@@ -2319,6 +2892,32 @@ fn main() {
       // Start scheduler service
       let state: tauri::State<'_, AppState> = app.state();
       state.scheduler.start(app.handle().clone());
+      let app_handle = app.handle().clone();
+      std::thread::spawn(move || {
+        loop {
+          std::thread::sleep(std::time::Duration::from_secs(30));
+          let state: tauri::State<'_, AppState> = app_handle.state();
+          let settings = match state.db.get_api_settings() {
+            Ok(Some(s)) => s,
+            _ => continue,
+          };
+          let voice: Option<VoiceSettings> = settings.voice_settings;
+          let Some(voice_settings) = voice else { continue; };
+          if voice_settings.base_url.trim().is_empty() { continue; }
+
+          let (available, _error) = check_voice_server_status_blocking(&voice_settings.base_url, voice_settings.api_key.as_deref())
+            .unwrap_or((false, None));
+
+          let mut last_guard = state.voice.last_status.lock().unwrap();
+          if *last_guard != Some(available) {
+            *last_guard = Some(available);
+            let _ = emit_server_event_app(&app_handle, &json!({
+              "type": "voice.server.status",
+              "payload": { "available": available }
+            }));
+          }
+        }
+      });
       Ok(())
     })
     .invoke_handler(tauri::generate_handler![
@@ -2344,6 +2943,9 @@ fn main() {
       sandbox_execute_js,
       sandbox_execute_python,
       sandbox_execute,
+      // Voice
+      transcribe_voice_stream,
+      list_voice_models,
       // Database commands - Sessions
       db_session_list,
       db_session_create,
@@ -2514,4 +3116,3 @@ mod tests {
         assert!(!settings.models[0].enabled);
     }
 }
-
